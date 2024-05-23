@@ -3,6 +3,7 @@ import httpx
 import re
 import os
 import json
+from dotenv import load_dotenv
 from telegram import ForceReply, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
@@ -13,6 +14,8 @@ logging.basicConfig(
 # set higher logging level for httpx to avoid all GET and POST requests being logged
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+load_dotenv() 
 
 API_BASE = os.getenv("API_BASE", "https://gptcloud.arc53.com")
 API_URL =  API_BASE + "/api/answer"

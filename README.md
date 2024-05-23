@@ -1,6 +1,6 @@
 # Telegram DocsGPT extension
 
-This repository contains the source code for a Telegram bot that leverages DocsGPT to provide intelligent responses to user queries. This bot is an extension for [DocsGPT](https://www.docsgpt.cloud/). 
+This repository contains the source code for a Telegram bot that leverages DocsGPT to provide intelligent responses to user queries. This bot is an extension for [DocsGPT](https://www.docsgpt.cloud/).
 
 ## Features
 - Responds to user queries with intelligent answers using DocsGPT.
@@ -25,18 +25,25 @@ Before you begin, ensure you have met the following requirements:
 2. Set up a virtual environment:
     ```bash
     python3 -m venv venv
-    source venv/bin/activate
     ```
+    - On macOS and Linux:
+      ```bash
+      source venv/bin/activate
+      ```
+    - On Windows:
+      ```bash
+      .\venv\Scripts\activate
+      ```
 
 3. Install dependencies:
     ```bash
     pip install -r requirements.txt
     ```
 
-4. Set environment variables:
-    ```bash
-    export TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
-    export API_KEY=<your-api-key>
+4. Create a `.env` file in the project directory and add your environment variables:
+    ```plaintext
+    TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
+    API_KEY=<your-api-key>
     ```
 
 5. Run the bot:
@@ -57,27 +64,31 @@ Before you begin, ensure you have met the following requirements:
     docker build -t telegram-gpt-bot .
     ```
 
-3. Run the Docker container:
+3. Create a `.env` file in the project directory and add your environment variables:
+    ```plaintext
+    TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
+    API_KEY=<your-api-key>
+    ```
+
+4. Run the Docker container:
     ```bash
-    docker run -e TELEGRAM_BOT_TOKEN=<your-telegram-bot-token> -e API_KEY=<your-api-key> telegram-gpt-bot
+    docker run --env-file .env telegram-gpt-bot
     ```
 
 ## Usage
 
 ### Telegram Commands
-
 - `/start` - Initiates the conversation with the bot.
 - `/help` - Provides help information.
 
 ### General Conversation
-
 Simply type any message, and the bot will respond with an intelligent answer based on the context of the conversation maintained in `context.chat_data`.
 
 ## File Description
-
 - `bot.py`: The main script for running the bot.
 - `requirements.txt`: Python dependencies required by the bot.
 - `Dockerfile`: Instructions to build the Docker image.
+- `.env`: File containing environment variables (not included, must be created).
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
