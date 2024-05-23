@@ -34,6 +34,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
+    help_text = (
+        "Here are the available commands:\n"
+        "/start - Begin a new conversation with the bot\n"
+        "/help - Display this help message\n\n"
+        "You can also just send any text to ask a question!"
+    )
     await update.message.reply_text("Help!")
 
 
