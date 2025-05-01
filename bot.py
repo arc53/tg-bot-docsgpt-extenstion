@@ -48,7 +48,7 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
     payload = {
         "question": question,
         "api_key": API_KEY,
-        "history": messages,
+        "history": "[]",
         "conversation_id": conversation_id
     }
     headers = {
