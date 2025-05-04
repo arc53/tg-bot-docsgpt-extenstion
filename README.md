@@ -5,6 +5,7 @@ This repository contains the source code for a Telegram bot that leverages DocsG
 ## Features
 - Responds to user queries with intelligent answers using DocsGPT.
 - Maintains conversation history for context-aware responses.
+- Supports multiple storage backends for conversation history (in-memory or MongoDB).
 - Easily deployable using Docker.
 
 ## Prerequisites
@@ -44,7 +45,18 @@ Before you begin, ensure you have met the following requirements:
     ```plaintext
     TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
     API_KEY=<your-api-key>
+    # Optional: Storage Configuration (Defaults to in-memory)
+    # STORAGE_TYPE=mongodb
+    # MONGODB_URI=<your-mongodb-connection-string>
+    # MONGODB_DB_NAME=telegram_bot_memory
+    # MONGODB_COLLECTION_NAME=chat_histories
     ```
+    - `TELEGRAM_BOT_TOKEN`: Your Telegram bot token from BotFather.
+    - `API_KEY`: Your DocsGPT API key.
+    - `STORAGE_TYPE`: (Optional) Specifies where to store conversation history. Defaults to `memory`. Set to `mongodb` to use MongoDB.
+    - `MONGODB_URI`: (Required if `STORAGE_TYPE=mongodb`) Your MongoDB connection string.
+    - `MONGODB_DB_NAME`: (Optional, defaults to `telegram_bot_memory`) The name of the MongoDB database.
+    - `MONGODB_COLLECTION_NAME`: (Optional, defaults to `chat_histories`) The name of the MongoDB collection.
 
 5. Run the bot:
     ```bash
@@ -68,7 +80,13 @@ Before you begin, ensure you have met the following requirements:
     ```plaintext
     TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
     API_KEY=<your-api-key>
+    # Optional: Storage Configuration (Defaults to in-memory)
+    # STORAGE_TYPE=mongodb
+    # MONGODB_URI=<your-mongodb-connection-string>
+    # MONGODB_DB_NAME=telegram_bot_memory
+    # MONGODB_COLLECTION_NAME=chat_histories
     ```
+    See the Python installation section above for details on environment variables.
 
 4. Run the Docker container:
     ```bash
@@ -88,6 +106,7 @@ Simply type any message, and the bot will respond with an intelligent answer bas
 - `bot.py`: The main script for running the bot.
 - `requirements.txt`: Python dependencies required by the bot.
 - `Dockerfile`: Instructions to build the Docker image.
+- `docker-compose.yml`: Docker Compose configuration for easier deployment.
 - `.env`: File containing environment variables (not included, must be created).
 
 ## License
