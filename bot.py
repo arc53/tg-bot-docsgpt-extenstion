@@ -5,9 +5,9 @@ import os
 import json
 import datetime
 from dotenv import load_dotenv
-from telegram import ForceReply, Update, User # Import User
+from telegram import ForceReply, Update, User
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ConfigurationError
 
@@ -143,7 +143,6 @@ async def save_chat_data(chat_id: int, history: list, conversation_id: str | Non
         logger.debug(f"Saved in-memory data for chat {chat_id_str} with user_info: {bool(user_info)}")
 
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     user = update.effective_user
@@ -183,7 +182,7 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
     headers = {
         "Content-Type": "application/json; charset=utf-8"
     }
-    timeout = 120.0
+    timeout = 120.0 # Set a reasonable timeout for the API call
     default_error_msg = "Sorry, I couldn't get an answer from the backend service."
 
     try:
@@ -227,6 +226,13 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     question = update.message.text
     logger.info(f"Received message from user {user.id} ({user.username or user.first_name}) in chat_id {chat_id}")
 
+    # --- Send Typing Action ---
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        logger.debug(f"Sent typing action to chat {chat_id}")
+    except Exception as e:
+        logger.warning(f"Failed to send typing action to chat {chat_id}: {e}")
+        # This is non-critical, we can continue processing even if typing doesn't show
 
     user_info_dict = {
         "id": user.id,
@@ -244,6 +250,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     current_history.append({"role": "user", "content": question})
 
+    # This is the potentially long-running call that we show typing for
     response_doc = await generate_answer(question, current_history, current_conversation_id)
     answer = response_doc["answer"]
     new_conversation_id = response_doc["conversation_id"] # Use the ID returned by API
@@ -252,6 +259,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await save_chat_data(chat_id, current_history, new_conversation_id, user_info_dict)
 
+    # Sending the reply will automatically stop the typing indicator
     try:
         await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
