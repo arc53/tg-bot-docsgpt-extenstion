@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  tg-bot:
+    image: arc53/tg-bot-docsgpt-extenstion:latest
+    container_name: tg-bot-docsgpt-extension
+    env_file:
+      - .env
+    restart: unless-stopped
