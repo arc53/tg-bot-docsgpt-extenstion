@@ -194,12 +194,6 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
         return {"answer": f"{default_error_msg} (Unexpected Error)", "conversation_id": conversation_id}
 
 
-def escape_markdown(text: str) -> str:
-    """Helper function to escape telegram markup symbols for MarkdownV2."""
-    if not isinstance(text, str): text = str(text)
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
-
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles non-command messages: get history, query API, save history, reply."""
@@ -224,11 +218,10 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await save_chat_data(chat_id, current_history, new_conversation_id)
 
-    escaped_answer = escape_markdown(answer)
     try:
-        await update.message.reply_text(escaped_answer, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.warning(f"Failed to send MarkdownV2 message to chat {chat_id}: {e}. Retrying with plain text.")
+        logger.warning(f"Failed to send Markdown message to chat {chat_id}: {e}. Retrying with plain text.")
         try:
             await update.message.reply_text(answer)
         except Exception as fallback_e:
