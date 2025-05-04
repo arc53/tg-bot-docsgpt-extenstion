@@ -48,15 +48,16 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
     payload = {
         "question": question,
         "api_key": API_KEY,
-        "history": "[]",
+        "history": json.dumps(messages),
         "conversation_id": conversation_id
     }
     headers = {
         "Content-Type": "application/json; charset=utf-8"
     }
-    timeout = 60.0
+    timeout = 120.0
     async with httpx.AsyncClient() as client:
-        response = await client.post(API_URL, json=payload, headers=headers, timeout=timeout)
+        print(f"Sending request to {API_URL} with payload: {payload}")
+        response = await client.post(API_URL, json=payload, timeout=timeout)
 
         if response.status_code == 200:
             data = response.json()
