@@ -5,7 +5,7 @@ import os
 import json
 import datetime
 from dotenv import load_dotenv
-from telegram import ForceReply, Update
+from telegram import ForceReply, Update, User # Import User
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
 from pymongo import MongoClient
@@ -43,7 +43,7 @@ if STORAGE_TYPE.lower() == "mongodb":
     try:
         logger.info(f"Attempting to connect to MongoDB: {MONGODB_URI[:15]}... DB: {MONGODB_DB_NAME}")
         mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000) # 5 second timeout
-        mongo_client.admin.command('ismaster')
+        mongo_client.admin.command('ismaster') # Check connection
         db = mongo_client[MONGODB_DB_NAME]
         mongo_collection = db[MONGODB_COLLECTION_NAME]
         logger.info(f"Successfully connected to MongoDB and selected collection '{MONGODB_COLLECTION_NAME}'.")
@@ -68,9 +68,13 @@ else:
 # --- Storage Access Functions ---
 
 async def get_chat_data(chat_id: int) -> dict:
-    """Fetches chat history and conversation ID from the configured storage."""
+    """
+    Fetches chat history, conversation ID, and user info from the configured storage.
+    The user info stored pertains to the *last known user* who interacted in this chat.
+    """
     chat_id_str = str(chat_id)
-    default_data = {"history": [], "conversation_id": None}
+    # Default structure now includes user_info
+    default_data = {"history": [], "conversation_id": None, "user_info": None}
 
     if STORAGE_TYPE == "mongodb" and mongo_collection is not None:
         try:
@@ -79,21 +83,29 @@ async def get_chat_data(chat_id: int) -> dict:
             if doc:
                 history = doc.get("conversation_history", [])
                 conv_id = doc.get("conversation_id", None)
-                return {"history": history, "conversation_id": conv_id}
+                user_info = doc.get("user_info", None) # Get user info
+                return {"history": history, "conversation_id": conv_id, "user_info": user_info}
             else:
                 return default_data
         except Exception as e:
             logger.error(f"MongoDB Error fetching data for chat_id {chat_id_str}: {e}", exc_info=True)
-            return default_data
+            return default_data # Return default on error
     else:
+        # Use .get with default for user_info for backward compatibility if key missing
         data = in_memory_storage.get(chat_id_str, default_data)
-        return data.copy()
+        return {
+            "history": data.get("history", []),
+            "conversation_id": data.get("conversation_id", None),
+            "user_info": data.get("user_info", None) # Get user info
+        }
 
 
-async def save_chat_data(chat_id: int, history: list, conversation_id: str | None):
-    """Saves chat history and conversation ID to the configured storage."""
+async def save_chat_data(chat_id: int, history: list, conversation_id: str | None, user_info: dict | None):
+    """
+    Saves chat history, conversation ID, and user info to the configured storage.
+    """
     chat_id_str = str(chat_id)
-    max_history_len_pairs = 10
+    max_history_len_pairs = 10 # Store last 10 pairs (20 messages)
     limited_history = history[-(max_history_len_pairs * 2):]
 
     if STORAGE_TYPE == "mongodb" and mongo_collection is not None:
@@ -102,6 +114,9 @@ async def save_chat_data(chat_id: int, history: list, conversation_id: str | Non
                 "conversation_history": limited_history,
                 "conversation_id": conversation_id,
             }
+            if user_info:
+                update_data["user_info"] = user_info
+
             update_doc = {
                 "$set": update_data,
                 "$currentDate": {"last_updated": True}
@@ -109,19 +124,25 @@ async def save_chat_data(chat_id: int, history: list, conversation_id: str | Non
             mongo_collection.update_one(
                 {"_id": chat_id_str},
                 update_doc,
-                upsert=True
+                upsert=True # Create document if it doesn't exist
             )
+            logger.debug(f"Saved data for chat {chat_id_str} with user_info: {bool(user_info)}")
         except Exception as e:
             logger.error(f"MongoDB Error saving data for chat_id {chat_id_str}: {e}", exc_info=True)
     else:
-        in_memory_storage[chat_id_str] = {
+        if chat_id_str not in in_memory_storage:
+             in_memory_storage[chat_id_str] = {} # Initialize if new
+
+        in_memory_storage[chat_id_str].update({ # Use update to merge data
             "history": limited_history,
             "conversation_id": conversation_id,
             "last_updated": datetime.datetime.now(datetime.timezone.utc) # Timestamp for memory store
-        }
+        })
+        if user_info:
+            in_memory_storage[chat_id_str]["user_info"] = user_info
+        logger.debug(f"Saved in-memory data for chat {chat_id_str} with user_info: {bool(user_info)}")
 
 
-# --- Telegram Bot Handlers (Mostly unchanged, use storage functions) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
@@ -147,9 +168,10 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
         return {"answer": "Error: Backend API key is not configured.", "conversation_id": conversation_id}
 
     try:
-        history_json = json.dumps(format_history_for_api(messages))
+        formatted_history = format_history_for_api(messages)
+        history_json = json.dumps(formatted_history)
     except TypeError as e:
-        logger.error(f"Failed to serialize history to JSON: {e}", exc_info=True)
+        logger.error(f"Failed to serialize history to JSON: {e}. History: {messages}", exc_info=True)
         history_json = json.dumps([])
 
     payload = {
@@ -187,22 +209,34 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
         logger.error(f"Network error calling DocsGPT API: {exc}")
         return {"answer": f"{default_error_msg} (Network Error)", "conversation_id": conversation_id}
     except json.JSONDecodeError as exc:
-        logger.error(f"Failed to decode JSON response from DocsGPT API: {exc}")
+        logger.error(f"Failed to decode JSON response from DocsGPT API: {exc}. Response text: {response.text}", exc_info=True) # Log response text
         return {"answer": f"{default_error_msg} (Invalid Response Format)", "conversation_id": conversation_id}
     except Exception as e:
         logger.error(f"Unexpected error in generate_answer: {e}", exc_info=True)
         return {"answer": f"{default_error_msg} (Unexpected Error)", "conversation_id": conversation_id}
 
 
-
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles non-command messages: get history, query API, save history, reply."""
-    if not update.message or not update.message.text or not update.effective_chat:
-        return
+    """Handles non-command messages: get history, query API, save history & user info, reply."""
+    if not update.message or not update.message.text or not update.effective_chat or not update.effective_user:
+        logger.warning("Echo handler received an update without message, text, chat, or user.")
+        return # Ignore updates without essential info
 
     chat_id = update.effective_chat.id
+    user = update.effective_user
     question = update.message.text
-    logger.info(f"Received message from chat_id {chat_id}")
+    logger.info(f"Received message from user {user.id} ({user.username or user.first_name}) in chat_id {chat_id}")
+
+
+    user_info_dict = {
+        "id": user.id,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "username": user.username,
+        "is_bot": user.is_bot,
+        "language_code": user.language_code
+    }
+    user_info_dict = {k: v for k, v in user_info_dict.items() if v is not None}
 
     chat_data = await get_chat_data(chat_id)
     current_history = chat_data["history"]
@@ -216,7 +250,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     current_history.append({"role": "assistant", "content": answer})
 
-    await save_chat_data(chat_id, current_history, new_conversation_id)
+    await save_chat_data(chat_id, current_history, new_conversation_id, user_info_dict)
 
     try:
         await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
@@ -232,20 +266,27 @@ def format_history_for_api(messages: list) -> list:
     """
     Converts internal history format [{'role': 'user', 'content': '...'}, ...]
     to the API required format [{'prompt': '...', 'response': '...'}, ...].
+    Ensures only valid pairs are included.
     """
     api_history = []
     i = 0
     while i < len(messages):
-        if messages[i].get("role") == "user":
-            prompt_content = messages[i].get("content", "")
-            current_pair = {"prompt": prompt_content}
-            if i + 1 < len(messages) and messages[i+1].get("role") == "assistant":
-                response_content = messages[i+1].get("content", "")
-                current_pair["response"] = response_content
-                i += 1
-            api_history.append(current_pair)
-        i += 1
+        # Look for a user message
+        if messages[i].get("role") == "user" and "content" in messages[i]:
+            prompt_content = messages[i]["content"]
+            response_content = None
+            # Check if the next message is a corresponding assistant response
+            if i + 1 < len(messages) and messages[i+1].get("role") == "assistant" and "content" in messages[i+1]:
+                response_content = messages[i+1]["content"]
+                # Add the pair to history
+                api_history.append({"prompt": prompt_content, "response": response_content})
+                i += 2 # Move past both user and assistant message
+            else:
+                i += 1 # Move past the user message only
+        else:
+            i += 1
     return api_history
+
 
 def main() -> None:
     """Start the bot."""
@@ -263,7 +304,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.UpdateType.MESSAGE, echo))
 
     logger.info("Starting Telegram bot polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
