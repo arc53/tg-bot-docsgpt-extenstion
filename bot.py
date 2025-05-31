@@ -23,6 +23,7 @@ API_BASE = os.getenv("API_BASE", "https://gptcloud.arc53.com")
 API_URL = API_BASE + "/api/answer"
 API_KEY = os.getenv("API_KEY")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+API_CONTEXT_MESSAGES_COUNT = 20 # Number of messages (10 pairs) to use for API context
 
 # --- Storage Configuration ---
 STORAGE_TYPE = os.getenv("STORAGE_TYPE", "memory") # Default to in-memory
@@ -39,11 +40,11 @@ in_memory_storage = {} # Used if STORAGE_TYPE is 'memory'
 if STORAGE_TYPE.lower() == "mongodb":
     if not MONGODB_URI:
         logger.error("STORAGE_TYPE is 'mongodb' but MONGODB_URI is not set. Exiting.")
-        exit(1) # Or fallback to memory: STORAGE_TYPE = "memory"; logger.warning(...)
+        exit(1)
     try:
         logger.info(f"Attempting to connect to MongoDB: {MONGODB_URI[:15]}... DB: {MONGODB_DB_NAME}")
-        mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000) # 5 second timeout
-        mongo_client.admin.command('ismaster') # Check connection
+        mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        mongo_client.admin.command('ismaster')
         db = mongo_client[MONGODB_DB_NAME]
         mongo_collection = db[MONGODB_COLLECTION_NAME]
         logger.info(f"Successfully connected to MongoDB and selected collection '{MONGODB_COLLECTION_NAME}'.")
@@ -71,47 +72,44 @@ async def get_chat_data(chat_id: int) -> dict:
     """
     Fetches chat history, conversation ID, and user info from the configured storage.
     The user info stored pertains to the *last known user* who interacted in this chat.
+    History fetched is the complete history.
     """
     chat_id_str = str(chat_id)
-    # Default structure now includes user_info
     default_data = {"history": [], "conversation_id": None, "user_info": None}
 
     if STORAGE_TYPE == "mongodb" and mongo_collection is not None:
         try:
             doc = mongo_collection.find_one({"_id": chat_id_str})
-
             if doc:
                 history = doc.get("conversation_history", [])
                 conv_id = doc.get("conversation_id", None)
-                user_info = doc.get("user_info", None) # Get user info
+                user_info = doc.get("user_info", None)
                 return {"history": history, "conversation_id": conv_id, "user_info": user_info}
             else:
                 return default_data
         except Exception as e:
             logger.error(f"MongoDB Error fetching data for chat_id {chat_id_str}: {e}", exc_info=True)
-            return default_data # Return default on error
+            return default_data
     else:
-        # Use .get with default for user_info for backward compatibility if key missing
         data = in_memory_storage.get(chat_id_str, default_data)
         return {
             "history": data.get("history", []),
             "conversation_id": data.get("conversation_id", None),
-            "user_info": data.get("user_info", None) # Get user info
+            "user_info": data.get("user_info", None)
         }
 
 
 async def save_chat_data(chat_id: int, history: list, conversation_id: str | None, user_info: dict | None):
     """
-    Saves chat history, conversation ID, and user info to the configured storage.
+    Saves the complete chat history, conversation ID, and user info to the configured storage.
     """
     chat_id_str = str(chat_id)
-    max_history_len_pairs = 10 # Store last 10 pairs (20 messages)
-    limited_history = history[-(max_history_len_pairs * 2):]
+    # The 'history' argument is the full history, which will be saved entirely.
 
     if STORAGE_TYPE == "mongodb" and mongo_collection is not None:
         try:
             update_data = {
-                "conversation_history": limited_history,
+                "conversation_history": history, # Save the full history
                 "conversation_id": conversation_id,
             }
             if user_info:
@@ -124,23 +122,23 @@ async def save_chat_data(chat_id: int, history: list, conversation_id: str | Non
             mongo_collection.update_one(
                 {"_id": chat_id_str},
                 update_doc,
-                upsert=True # Create document if it doesn't exist
+                upsert=True
             )
-            logger.debug(f"Saved data for chat {chat_id_str} with user_info: {bool(user_info)}")
+            logger.debug(f"Saved full history for chat {chat_id_str} with user_info: {bool(user_info)}")
         except Exception as e:
             logger.error(f"MongoDB Error saving data for chat_id {chat_id_str}: {e}", exc_info=True)
-    else:
+    else: # in-memory storage
         if chat_id_str not in in_memory_storage:
-             in_memory_storage[chat_id_str] = {} # Initialize if new
+             in_memory_storage[chat_id_str] = {}
 
-        in_memory_storage[chat_id_str].update({ # Use update to merge data
-            "history": limited_history,
+        in_memory_storage[chat_id_str].update({
+            "history": history, # Save the full history
             "conversation_id": conversation_id,
-            "last_updated": datetime.datetime.now(datetime.timezone.utc) # Timestamp for memory store
+            "last_updated": datetime.datetime.now(datetime.timezone.utc)
         })
         if user_info:
             in_memory_storage[chat_id_str]["user_info"] = user_info
-        logger.debug(f"Saved in-memory data for chat {chat_id_str} with user_info: {bool(user_info)}")
+        logger.debug(f"Saved full in-memory history for chat {chat_id_str} with user_info: {bool(user_info)}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -161,17 +159,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(help_text)
 
 async def generate_answer(question: str, messages: list, conversation_id: str | None) -> dict:
-    """Generates an answer using the external DocsGPT API."""
+    """
+    Generates an answer using the external DocsGPT API.
+    Uses only the last API_CONTEXT_MESSAGES_COUNT messages for context.
+    """
     if not API_KEY:
         logger.warning("API_KEY is not set. Cannot call DocsGPT API.")
         return {"answer": "Error: Backend API key is not configured.", "conversation_id": conversation_id}
 
+    # Use only the last API_CONTEXT_MESSAGES_COUNT messages for the API call context
+    context_messages = messages[-API_CONTEXT_MESSAGES_COUNT:]
+
     try:
-        formatted_history = format_history_for_api(messages)
+        formatted_history = format_history_for_api(context_messages) # Use limited context_messages
         history_json = json.dumps(formatted_history)
     except TypeError as e:
-        logger.error(f"Failed to serialize history to JSON: {e}. History: {messages}", exc_info=True)
-        history_json = json.dumps([])
+        logger.error(f"Failed to serialize history to JSON: {e}. History slice: {context_messages}", exc_info=True)
+        history_json = json.dumps([]) # Fallback to empty history for API
 
     payload = {
         "question": question,
@@ -182,13 +186,13 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
     headers = {
         "Content-Type": "application/json; charset=utf-8"
     }
-    timeout = 120.0 # Set a reasonable timeout for the API call
+    timeout = 120.0
     default_error_msg = "Sorry, I couldn't get an answer from the backend service."
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(API_URL, json=payload, headers=headers, timeout=timeout)
-            response.raise_for_status() # Raise HTTPStatusError for 4xx/5xx
+            response.raise_for_status()
 
             data = response.json()
             answer = data.get("answer", default_error_msg)
@@ -208,7 +212,7 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
         logger.error(f"Network error calling DocsGPT API: {exc}")
         return {"answer": f"{default_error_msg} (Network Error)", "conversation_id": conversation_id}
     except json.JSONDecodeError as exc:
-        logger.error(f"Failed to decode JSON response from DocsGPT API: {exc}. Response text: {response.text}", exc_info=True) # Log response text
+        logger.error(f"Failed to decode JSON response from DocsGPT API: {exc}. Response text: {response.text}", exc_info=True)
         return {"answer": f"{default_error_msg} (Invalid Response Format)", "conversation_id": conversation_id}
     except Exception as e:
         logger.error(f"Unexpected error in generate_answer: {e}", exc_info=True)
@@ -219,20 +223,18 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles non-command messages: get history, query API, save history & user info, reply."""
     if not update.message or not update.message.text or not update.effective_chat or not update.effective_user:
         logger.warning("Echo handler received an update without message, text, chat, or user.")
-        return # Ignore updates without essential info
+        return
 
     chat_id = update.effective_chat.id
     user = update.effective_user
     question = update.message.text
     logger.info(f"Received message from user {user.id} ({user.username or user.first_name}) in chat_id {chat_id}")
 
-    # --- Send Typing Action ---
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         logger.debug(f"Sent typing action to chat {chat_id}")
     except Exception as e:
         logger.warning(f"Failed to send typing action to chat {chat_id}: {e}")
-        # This is non-critical, we can continue processing even if typing doesn't show
 
     user_info_dict = {
         "id": user.id,
@@ -244,22 +246,23 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     user_info_dict = {k: v for k, v in user_info_dict.items() if v is not None}
 
+    # Get full history
     chat_data = await get_chat_data(chat_id)
-    current_history = chat_data["history"]
+    current_history = chat_data["history"] # This is the full history
     current_conversation_id = chat_data["conversation_id"]
 
     current_history.append({"role": "user", "content": question})
 
-    # This is the potentially long-running call that we show typing for
+    # generate_answer will use a slice of current_history for API context
     response_doc = await generate_answer(question, current_history, current_conversation_id)
     answer = response_doc["answer"]
-    new_conversation_id = response_doc["conversation_id"] # Use the ID returned by API
+    new_conversation_id = response_doc["conversation_id"]
 
     current_history.append({"role": "assistant", "content": answer})
 
+    # Save the full, updated current_history
     await save_chat_data(chat_id, current_history, new_conversation_id, user_info_dict)
 
-    # Sending the reply will automatically stop the typing indicator
     try:
         await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
@@ -279,18 +282,15 @@ def format_history_for_api(messages: list) -> list:
     api_history = []
     i = 0
     while i < len(messages):
-        # Look for a user message
         if messages[i].get("role") == "user" and "content" in messages[i]:
             prompt_content = messages[i]["content"]
             response_content = None
-            # Check if the next message is a corresponding assistant response
             if i + 1 < len(messages) and messages[i+1].get("role") == "assistant" and "content" in messages[i+1]:
                 response_content = messages[i+1]["content"]
-                # Add the pair to history
                 api_history.append({"prompt": prompt_content, "response": response_content})
-                i += 2 # Move past both user and assistant message
+                i += 2
             else:
-                i += 1 # Move past the user message only
+                i += 1
         else:
             i += 1
     return api_history
