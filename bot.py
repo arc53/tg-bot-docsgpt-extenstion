@@ -23,6 +23,20 @@ API_BASE = os.getenv("API_BASE", "https://gptcloud.arc53.com")
 API_URL = API_BASE + "/api/answer"
 API_KEY = os.getenv("API_KEY")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# --- Load Additional Agents ---
+ADDITIONAL_AGENTS = {}
+for key, value in os.environ.items():
+    if key.startswith("API_KEY_") and key != "API_KEY":
+        agent_name = key[8:].lower() # remove API_KEY_ prefix and lowercase
+        ADDITIONAL_AGENTS[agent_name] = value
+logger.info(f"Loaded {len(ADDITIONAL_AGENTS)} additional agents: {list(ADDITIONAL_AGENTS.keys())}")
+
+if not API_KEY and ADDITIONAL_AGENTS:
+    # Fallback to the first available agent (sorted alphabetically for determinism)
+    first_agent = sorted(ADDITIONAL_AGENTS.keys())[0]
+    API_KEY = ADDITIONAL_AGENTS[first_agent]
+    logger.warning(f"API_KEY not set. Defaulting to agent '{first_agent}' key.")
 API_CONTEXT_MESSAGES_COUNT = 20 # Number of messages (10 pairs) to use for API context
 
 # --- Storage Configuration ---
@@ -48,12 +62,6 @@ if STORAGE_TYPE.lower() == "mongodb":
         db = mongo_client[MONGODB_DB_NAME]
         mongo_collection = db[MONGODB_COLLECTION_NAME]
         logger.info(f"Successfully connected to MongoDB and selected collection '{MONGODB_COLLECTION_NAME}'.")
-    except (ConnectionFailure, ConfigurationError) as e:
-        logger.error(f"Failed to connect to MongoDB: {e}", exc_info=True)
-        logger.warning("Falling back to in-memory storage due to MongoDB connection error.")
-        STORAGE_TYPE = "memory"
-        mongo_client = None
-        mongo_collection = None
     except Exception as e:
         logger.error(f"An unexpected error occurred during MongoDB initialization: {e}", exc_info=True)
         logger.warning("Falling back to in-memory storage.")
@@ -158,12 +166,41 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text(help_text)
 
-async def generate_answer(question: str, messages: list, conversation_id: str | None) -> dict:
+def route_message(text: str) -> tuple[str, str]:
+    """
+    Determines which API key to use based on the message prefix.
+    Returns (api_key, cleaned_text).
+    """
+    if not text:
+        return API_KEY, text
+
+    # Check for @AGENT or #AGENT prefix
+    # We look for the first space to separate the tag
+    first_space = text.find(' ')
+    if first_space != -1:
+        tag = text[:first_space]
+        content = text[first_space+1:]
+    else:
+        tag = text
+        content = ""
+
+    if tag.startswith('#'):
+        agent_name = tag[1:].lower()
+        if agent_name in ADDITIONAL_AGENTS:
+            return ADDITIONAL_AGENTS[agent_name], content
+        else:
+            # Unknown agent
+            return None, None
+    
+    return API_KEY, text
+
+
+async def generate_answer(question: str, messages: list, conversation_id: str | None, api_key: str) -> dict:
     """
     Generates an answer using the external DocsGPT API.
     Uses only the last API_CONTEXT_MESSAGES_COUNT messages for context.
     """
-    if not API_KEY:
+    if not api_key:
         logger.warning("API_KEY is not set. Cannot call DocsGPT API.")
         return {"answer": "Error: Backend API key is not configured.", "conversation_id": conversation_id}
 
@@ -179,7 +216,7 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
 
     payload = {
         "question": question,
-        "api_key": API_KEY,
+        "api_key": api_key,
         "history": history_json,
         "conversation_id": conversation_id
     }
@@ -199,6 +236,9 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
             returned_conv_id = data.get("conversation_id", conversation_id)
             return {"answer": answer, "conversation_id": returned_conv_id}
 
+    except (httpx.ConnectTimeout, httpx.ReadTimeout):
+        logger.error("DocsGPT API timed out.")
+        return {"answer": "The brain is currently offline, please try again later", "conversation_id": conversation_id}
     except httpx.HTTPStatusError as exc:
         error_details = f"Status {exc.response.status_code}"
         try:
@@ -253,8 +293,21 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     current_history.append({"role": "user", "content": question})
 
+    current_history.append({"role": "user", "content": question})
+
+    # Determine API key and clean question if needed
+    
+    target_api_key, cleaned_question = route_message(question)
+
+    if target_api_key is None:
+        await update.message.reply_text("This agent doesn't exist")
+        return
+    
+    # Update the last user message content to be the cleaned version
+    current_history[-1]["content"] = cleaned_question
+
     # generate_answer will use a slice of current_history for API context
-    response_doc = await generate_answer(question, current_history, current_conversation_id)
+    response_doc = await generate_answer(cleaned_question, current_history, current_conversation_id, target_api_key)
     answer = response_doc["answer"]
     new_conversation_id = response_doc["conversation_id"]
 
@@ -263,14 +316,54 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Save the full, updated current_history
     await save_chat_data(chat_id, current_history, new_conversation_id, user_info_dict)
 
-    try:
-        await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.warning(f"Failed to send Markdown message to chat {chat_id}: {e}. Retrying with plain text.")
+    # Split message if too long
+    messages_to_send = split_message(answer)
+
+    for msg_chunk in messages_to_send:
         try:
-            await update.message.reply_text(answer)
-        except Exception as fallback_e:
-            logger.error(f"Failed to send fallback plain text message to chat {chat_id}: {fallback_e}", exc_info=True)
+            await update.message.reply_text(msg_chunk, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.warning(f"Failed to send Markdown message to chat {chat_id}: {e}. Retrying with plain text.")
+            try:
+                await update.message.reply_text(msg_chunk)
+            except Exception as fallback_e:
+                logger.error(f"Failed to send fallback plain text message to chat {chat_id}: {fallback_e}", exc_info=True)
+
+
+def split_message(text: str, limit: int = 4096) -> list[str]:
+    """
+    Splits a message into chunks of at most `limit` characters.
+    Tries to split by newlines first, then spaces, then forced split.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+
+        # Try to find the last newline within the limit
+        split_at = text.rfind('\n', 0, limit)
+        if split_at == -1:
+            # No newline found, try to find the last space
+            split_at = text.rfind(' ', 0, limit)
+        
+        if split_at == -1:
+            # No space found, force split at limit
+            split_at = limit
+        
+        chunks.append(text[:split_at])
+        
+        # If we split at a specific character that is whitespace, we can skip it for the next chunk start
+        # unless it's a forced split.
+        if split_at < len(text) and text[split_at] in ['\n', ' ']:
+             text = text[split_at+1:]
+        else:
+             text = text[split_at:]
+    
+    return chunks
 
 
 def format_history_for_api(messages: list) -> list:

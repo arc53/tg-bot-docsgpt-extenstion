@@ -45,6 +45,9 @@ Before you begin, ensure you have met the following requirements:
     ```plaintext
     TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
     API_KEY=<your-api-key>
+    # Optional: Multiple Agents
+    # API_KEY_SUPPORT=<support-agent-api-key>
+    # API_KEY_SALES=<sales-agent-api-key>
     # Optional: Storage Configuration (Defaults to in-memory)
     # STORAGE_TYPE=mongodb
     # MONGODB_URI=<your-mongodb-connection-string>
@@ -52,7 +55,8 @@ Before you begin, ensure you have met the following requirements:
     # MONGODB_COLLECTION_NAME=chat_histories
     ```
     - `TELEGRAM_BOT_TOKEN`: Your Telegram bot token from BotFather.
-    - `API_KEY`: Your DocsGPT API key.
+    - `API_KEY`: Your default DocsGPT Agent API key. If not set, the bot will fallback to the first available agent key.
+    - `API_KEY_<AGENT_NAME>`: (Optional) API keys for specific agents. Replace `<AGENT_NAME>` with the agent's name (e.g., `SUPPORT`, `SALES`).
     - `STORAGE_TYPE`: (Optional) Specifies where to store conversation history. Defaults to `memory`. Set to `mongodb` to use MongoDB.
     - `MONGODB_URI`: (Required if `STORAGE_TYPE=mongodb`) Your MongoDB connection string.
     - `MONGODB_DB_NAME`: (Optional, defaults to `telegram_bot_memory`) The name of the MongoDB database.
@@ -80,6 +84,9 @@ Before you begin, ensure you have met the following requirements:
     ```plaintext
     TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
     API_KEY=<your-api-key>
+    # Optional: Multiple Agents
+    # API_KEY_SUPPORT=<support-agent-api-key>
+    # API_KEY_SALES=<sales-agent-api-key>
     # Optional: Storage Configuration (Defaults to in-memory)
     # STORAGE_TYPE=mongodb
     # MONGODB_URI=<your-mongodb-connection-string>
@@ -101,6 +108,15 @@ Before you begin, ensure you have met the following requirements:
 
 ### General Conversation
 Simply type any message, and the bot will respond with an intelligent answer based on the context of the conversation maintained in `context.chat_data`.
+
+### Multiple Agents
+You can configure multiple agents by setting environment variables like `API_KEY_SUPPORT`, `API_KEY_SALES`, etc.
+
+To query a specific agent, start your message with `#` followed by the agent name:
+- `#support I have a bug` -> Routes to the agent configured with `API_KEY_SUPPORT`.
+- `#sales What is the pricing?` -> Routes to the agent configured with `API_KEY_SALES`.
+
+If no agent tag is provided the bot uses the default `API_KEY`. If `API_KEY` is not set, it falls back to the first available agent.
 
 ## File Description
 - `bot.py`: The main script for running the bot.
