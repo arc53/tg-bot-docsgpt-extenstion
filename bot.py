@@ -296,9 +296,6 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current_history.append({"role": "user", "content": question})
 
     # Determine API key and clean question if needed
-    # Note: We use the original question for history, but the routed API key for the request.
-    # Wait, if we strip the tag, should we store the stripped version in history?
-    # Usually yes, so the bot context doesn't get confused by the routing tag.
     
     target_api_key, cleaned_question = route_message(question)
 
