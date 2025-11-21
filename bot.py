@@ -48,12 +48,6 @@ if STORAGE_TYPE.lower() == "mongodb":
         db = mongo_client[MONGODB_DB_NAME]
         mongo_collection = db[MONGODB_COLLECTION_NAME]
         logger.info(f"Successfully connected to MongoDB and selected collection '{MONGODB_COLLECTION_NAME}'.")
-    except (ConnectionFailure, ConfigurationError) as e:
-        logger.error(f"Failed to connect to MongoDB: {e}", exc_info=True)
-        logger.warning("Falling back to in-memory storage due to MongoDB connection error.")
-        STORAGE_TYPE = "memory"
-        mongo_client = None
-        mongo_collection = None
     except Exception as e:
         logger.error(f"An unexpected error occurred during MongoDB initialization: {e}", exc_info=True)
         logger.warning("Falling back to in-memory storage.")
@@ -199,6 +193,9 @@ async def generate_answer(question: str, messages: list, conversation_id: str | 
             returned_conv_id = data.get("conversation_id", conversation_id)
             return {"answer": answer, "conversation_id": returned_conv_id}
 
+    except (httpx.ConnectTimeout, httpx.ReadTimeout):
+        logger.error("DocsGPT API timed out.")
+        return {"answer": "The brain is currently offline, please try again later", "conversation_id": conversation_id}
     except httpx.HTTPStatusError as exc:
         error_details = f"Status {exc.response.status_code}"
         try:
@@ -263,14 +260,54 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Save the full, updated current_history
     await save_chat_data(chat_id, current_history, new_conversation_id, user_info_dict)
 
-    try:
-        await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.warning(f"Failed to send Markdown message to chat {chat_id}: {e}. Retrying with plain text.")
+    # Split message if too long
+    messages_to_send = split_message(answer)
+
+    for msg_chunk in messages_to_send:
         try:
-            await update.message.reply_text(answer)
-        except Exception as fallback_e:
-            logger.error(f"Failed to send fallback plain text message to chat {chat_id}: {fallback_e}", exc_info=True)
+            await update.message.reply_text(msg_chunk, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.warning(f"Failed to send Markdown message to chat {chat_id}: {e}. Retrying with plain text.")
+            try:
+                await update.message.reply_text(msg_chunk)
+            except Exception as fallback_e:
+                logger.error(f"Failed to send fallback plain text message to chat {chat_id}: {fallback_e}", exc_info=True)
+
+
+def split_message(text: str, limit: int = 4096) -> list[str]:
+    """
+    Splits a message into chunks of at most `limit` characters.
+    Tries to split by newlines first, then spaces, then forced split.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+
+        # Try to find the last newline within the limit
+        split_at = text.rfind('\n', 0, limit)
+        if split_at == -1:
+            # No newline found, try to find the last space
+            split_at = text.rfind(' ', 0, limit)
+        
+        if split_at == -1:
+            # No space found, force split at limit
+            split_at = limit
+        
+        chunks.append(text[:split_at])
+        
+        # If we split at a specific character that is whitespace, we can skip it for the next chunk start
+        # unless it's a forced split.
+        if split_at < len(text) and text[split_at] in ['\n', ' ']:
+             text = text[split_at+1:]
+        else:
+             text = text[split_at:]
+    
+    return chunks
 
 
 def format_history_for_api(messages: list) -> list:
