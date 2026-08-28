@@ -1,0 +1,45 @@
+[package]
+name = "docsgpt-telegram"
+version = "2.0.0"
+edition = "2024"
+description = "Telegram bots for DocsGPT agents: streaming answers, rich messages, attachments, multi-bot"
+license = "MIT"
+repository = "https://github.com/arc53/tg-bot-docsgpt-extenstion"
+
+[dependencies]
+base64 = "0.22"
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = "0.8.9"
+bytes = "1.12.1"
+chrono = "0.4.45"
+clap = { version = "4.6.6", features = ["derive", "env"] }
+dotenvy = "0.15.7"
+frankenstein = { git = "https://github.com/ayrat555/frankenstein", rev = "2ffdb59b0e66b870ff3225b9882750ee710ad54c", default-features = false, features = ["client-reqwest"] }
+futures-util = "0.3.34"
+mime_guess = "2.0.5"
+mongodb = "3.8.2"
+pulldown-cmark = "0.13.4"
+rand = "0.10.2"
+regex = "1.13.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+toml = "1.1.4"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+url = "2.5.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "stream", "rustls", "query", "http2", "charset"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+# The e2e mocks parse multipart uploads (sendDocument, store_attachment) with axum's extractor.
+axum = { version = "0.8.9", features = ["multipart"] }

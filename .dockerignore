@@ -1,0 +1,12 @@
+target
+venv
+.env
+.env.*
+data
+*.db
+*.db-*
+.git
+.github
+*.md
+docs
+tests

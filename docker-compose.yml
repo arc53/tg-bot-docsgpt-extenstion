@@ -1,9 +1,16 @@
-version: '3.8'
-
 services:
   tg-bot:
     image: arc53/tg-bot-docsgpt-extenstion:latest
     container_name: tg-bot-docsgpt-extension
     env_file:
       - .env
+    volumes:
+      - botdata:/app/data
+      # Multi-bot setup: mount a config file and point the bot at it.
+      # - ./docsgpt-tg.toml:/app/docsgpt-tg.toml:ro
+    # ports:
+    #   - "8080:8080"   # webhook mode / healthz
     restart: unless-stopped
+
+volumes:
+  botdata:

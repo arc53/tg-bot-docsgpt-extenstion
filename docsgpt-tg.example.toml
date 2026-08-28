@@ -1,0 +1,58 @@
+# Copy to docsgpt-tg.toml (or point DOCSGPT_TG_CONFIG at it).
+# `${VAR}` and `${VAR:-default}` are replaced from the environment, so secrets
+# can stay in .env or your orchestrator.
+
+api_base = "https://gptcloud.arc53.com"   # your DocsGPT server for self-hosting
+
+[storage]
+backend = "sqlite"                         # sqlite (default) | mongodb | memory
+path = "data/docsgpt-telegram.db"
+# uri = "${MONGODB_URI}"                   # for backend = "mongodb"
+# db_name = "telegram_bot_memory"
+# collection = "telegram_bot_state"
+# legacy_collection = "chat_histories"     # v1 bot data, migrated on first use
+
+[server]                                   # only needed for webhook mode or /healthz
+enabled = false
+bind = "0.0.0.0:8080"
+# public_url = "https://bots.example.com"  # Telegram must reach <public_url>/webhook/<bot name>
+# webhook_secret = "${WEBHOOK_SECRET}"     # generated when omitted
+
+[[bots]]
+name = "support"                           # short id used in storage keys and webhook paths
+token = "${TG_TOKEN_SUPPORT}"
+mode = "polling"                           # polling | webhook
+groups = "mention"                         # mention | all | off
+streaming = true                           # live drafts with a Stop button in private chats
+reactions = true                           # 👀 while working
+attachments = true                         # photos, documents, voice notes
+voice_replies = false                      # answer voice notes with a voice note too
+business = true                            # reply to customers in connected Telegram Business chats
+guest = true                               # reply when mentioned in chats the bot is not in
+inline = true                              # @bot question? from any chat
+# allowed_chats = [123456789, -1001234567890]
+# welcome = "Hi {name}! Ask me about our product.\n\n{agents}"
+# description = "Answers questions about Example Inc."
+# short_description = "Example Inc. assistant"
+# menu_button_url = "https://your-docsgpt-widget.example.com"
+# max_file_mb = 20
+
+  [[bots.agents]]
+  name = "support"
+  api_key = "${DOCSGPT_KEY_SUPPORT}"
+  description = "Product and billing questions"
+  default = true
+
+  [[bots.agents]]
+  name = "sales"
+  api_key = "${DOCSGPT_KEY_SALES}"
+  description = "Pricing and plans"
+
+[[bots]]
+name = "internal-docs"
+token = "${TG_TOKEN_INTERNAL}"
+allowed_chats = [-1001234567890]
+
+  [[bots.agents]]
+  name = "docs"
+  api_key = "${DOCSGPT_KEY_DOCS}"
