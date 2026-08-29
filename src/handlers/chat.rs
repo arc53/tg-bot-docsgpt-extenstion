@@ -209,11 +209,11 @@ impl DraftState {
                     return;
                 }
                 Err(e) if is_bad_request(&e) => {
-                    tracing::debug!(error = %e, "rich draft rejected; using plain drafts");
+                    tracing::debug!(error = %format!("{e:#}"), "rich draft rejected; using plain drafts");
                     self.rich_ok = false;
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "rich draft failed");
+                    tracing::warn!(error = %format!("{e:#}"), "rich draft failed");
                     self.last_flush = Instant::now();
                     return;
                 }
@@ -229,7 +229,7 @@ impl DraftState {
                 self.shown = true;
                 typing.cancel();
             }
-            Err(e) => tracing::warn!(error = %e, "plain draft failed"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "plain draft failed"),
         }
         self.last_flush = Instant::now();
     }
@@ -532,7 +532,7 @@ async fn deliver_final(
     match ctx.tg.send_rich_markdown(target, &rich_full, None).await {
         Ok(_) => sent_rich = true,
         Err(e) => {
-            tracing::debug!(error = %e, "rich message rejected; trying without inline media");
+            tracing::debug!(error = %format!("{e:#}"), "rich message rejected; trying without inline media");
             if !inline_images.is_empty() {
                 let rich_plain = render::clamp_rich(
                     &format!("{text_no_images}{}", render::rich_sources(sources)),
@@ -573,7 +573,7 @@ async fn deliver_final(
             {
                 Ok(_) => {}
                 Err(e) if is_bad_request(&e) => {
-                    tracing::debug!(error = %e, "MarkdownV2 rejected; sending plain text");
+                    tracing::debug!(error = %format!("{e:#}"), "MarkdownV2 rejected; sending plain text");
                     v2_ok = false;
                     break;
                 }

@@ -32,7 +32,7 @@ pub async fn run_polling(ctx: Arc<BotContext>) {
                 }
             }
             Err(e) => {
-                tracing::warn!(bot = %ctx.cfg.name, error = %e, "getUpdates failed; retrying in {:?}", backoff);
+                tracing::warn!(bot = %ctx.cfg.name, error = %format!("{e:#}"), "getUpdates failed; retrying in {:?}", backoff);
                 tokio::select! {
                     _ = ctx.app.shutdown.cancelled() => break,
                     _ = tokio::time::sleep(backoff) => {}
