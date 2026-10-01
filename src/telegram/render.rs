@@ -3,36 +3,14 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::docsgpt::Source;
+use docsgpt_bot::docsgpt::Source;
+use docsgpt_bot::markdown::{clamp_markdown, clean_title, render_table_monospace};
+pub use docsgpt_bot::markdown::{
+    close_open_fence, pack_blocks, split_block, split_plain, strip_images,
+};
 
 pub const TG_TEXT_LIMIT: usize = 4096;
 pub const RICH_TEXT_LIMIT: usize = 30_000;
-
-/// Remove markdown images, returning the text without them and the image URLs.
-pub fn strip_images(md: &str) -> (String, Vec<String>) {
-    let re = regex::Regex::new(r#"!\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)"#).unwrap();
-    let mut urls = Vec::new();
-    let replaced = re.replace_all(md, |caps: &regex::Captures| {
-        let url = caps[1].to_string();
-        if (url.starts_with("http://") || url.starts_with("https://")) && !urls.contains(&url) {
-            urls.push(url);
-        }
-        String::new()
-    });
-    // Drop lines that became empty because they only held an image.
-    let mut out = String::with_capacity(replaced.len());
-    let mut prev_blank = false;
-    for line in replaced.lines() {
-        let blank = line.trim().is_empty();
-        if blank && prev_blank {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-        prev_blank = blank;
-    }
-    (out.trim().to_string(), urls)
-}
 
 /// Escape for MarkdownV2 running text.
 pub fn escape_v2(s: &str) -> String {
@@ -372,121 +350,6 @@ pub fn markdown_v2_blocks(md: &str) -> Vec<String> {
     st.blocks
 }
 
-fn render_table_monospace(rows: &[Vec<String>]) -> String {
-    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
-    if cols == 0 {
-        return String::new();
-    }
-    let mut widths = vec![0usize; cols];
-    for r in rows {
-        for (i, c) in r.iter().enumerate() {
-            widths[i] = widths[i].max(c.chars().count().min(40));
-        }
-    }
-    let mut out = String::new();
-    for (ri, r) in rows.iter().enumerate() {
-        let mut line = String::new();
-        for (i, width) in widths.iter().enumerate() {
-            let cell = r.get(i).map(String::as_str).unwrap_or("");
-            let cell: String = cell.chars().take(40).collect();
-            let pad = width.saturating_sub(cell.chars().count());
-            line.push_str(&cell);
-            line.push_str(&" ".repeat(pad));
-            if i + 1 < cols {
-                line.push_str(" | ");
-            }
-        }
-        out.push_str(line.trim_end());
-        out.push('\n');
-        if ri == 0 && rows.len() > 1 {
-            let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-            out.push_str(&sep.join("-|-"));
-            out.push('\n');
-        }
-    }
-    out.trim_end().to_string()
-}
-
-/// Pack MarkdownV2 blocks into messages of at most `limit` characters,
-/// splitting oversized code blocks without breaking the fence.
-pub fn pack_blocks(blocks: &[String], limit: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for block in blocks {
-        let pieces: Vec<String> = if block.chars().count() > limit {
-            split_block(block, limit)
-        } else {
-            vec![block.clone()]
-        };
-        for piece in pieces {
-            let extra = if cur.is_empty() { 0 } else { 2 };
-            if cur.chars().count() + extra + piece.chars().count() > limit {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                cur = piece;
-            } else {
-                if !cur.is_empty() {
-                    cur.push_str("\n\n");
-                }
-                cur.push_str(&piece);
-            }
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-fn split_block(block: &str, limit: usize) -> Vec<String> {
-    if block.starts_with("```") {
-        let first_nl = block.find('\n').unwrap_or(block.len());
-        let fence = &block[..first_nl];
-        let body = block[first_nl..]
-            .trim_start_matches('\n')
-            .trim_end_matches("```")
-            .trim_end_matches('\n');
-        let overhead = fence.chars().count() + 8;
-        let chunks = split_plain(body, limit.saturating_sub(overhead).max(64));
-        return chunks
-            .into_iter()
-            .map(|c| format!("{fence}\n{c}\n```"))
-            .collect();
-    }
-    split_plain(block, limit)
-}
-
-/// Split plain text at newlines, then spaces, then hard — character-aware.
-pub fn split_plain(text: &str, limit: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut rest: Vec<char> = text.chars().collect();
-    while !rest.is_empty() {
-        if rest.len() <= limit {
-            chunks.push(rest.iter().collect());
-            break;
-        }
-        let window = &rest[..limit];
-        let mut cut = window.iter().rposition(|c| *c == '\n');
-        if cut.is_none_or(|c| c < limit / 4) {
-            cut = window.iter().rposition(|c| *c == ' ').or(cut);
-        }
-        let cut = cut.filter(|c| *c > 0).unwrap_or(limit);
-        let piece: String = rest[..cut].iter().collect();
-        chunks.push(piece.trim_end().to_string());
-        let skip = if cut < rest.len() && (rest[cut] == '\n' || rest[cut] == ' ') {
-            cut + 1
-        } else {
-            cut
-        };
-        rest.drain(..skip);
-    }
-    chunks
-        .into_iter()
-        .filter(|c| !c.trim().is_empty())
-        .collect()
-}
-
 /// Whole markdown → MarkdownV2 messages.
 pub fn markdown_v2_messages(md: &str, limit: usize) -> Vec<String> {
     let blocks = markdown_v2_blocks(md);
@@ -496,16 +359,6 @@ pub fn markdown_v2_messages(md: &str, limit: usize) -> Vec<String> {
 /// Plain-text messages (last resort).
 pub fn plain_messages(text: &str, limit: usize) -> Vec<String> {
     split_plain(text, limit)
-}
-
-fn clean_title(t: &str) -> String {
-    let t = t.trim();
-    let t: String = t
-        .chars()
-        .map(|c| if c == '[' || c == ']' { ' ' } else { c })
-        .collect();
-    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::util::truncate_chars(if t.is_empty() { "Source" } else { &t }, 80)
 }
 
 /// Collapsible sources block in Rich Markdown.
@@ -568,59 +421,104 @@ pub fn markdown_to_plain(md: &str) -> String {
     unescape_v2(&joined)
 }
 
+/// Undo MarkdownV2: drop formatting marks and escapes in running text and turn
+/// `[text](url)` into `text (url)`. Inline code and fenced blocks are copied
+/// literally (their `*`, `_`, `~` and brackets are content, not markup); link
+/// text may itself contain code.
 fn unescape_v2(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(n) = chars.next() {
-                out.push(n);
-            }
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            out.push(chars[i + 1]);
+            i += 2;
             continue;
         }
-        if matches!(c, '*' | '_' | '~' | '`') {
+        if c == '`' {
+            let (code, next) = code_span(&chars, i);
+            out.push_str(&code);
+            i = next;
             continue;
         }
-        out.push(c);
-    }
-    // Links: [text](url) → text (url)
-    let re = regex::Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap();
-    re.replace_all(&out, "$1 ($2)").into_owned()
-}
-
-/// Rich Markdown cannot exceed the limit; cut at a paragraph boundary.
-pub fn clamp_rich(md: &str, limit: usize) -> String {
-    if md.chars().count() <= limit {
-        return md.to_string();
-    }
-    let mut out = String::new();
-    for para in md.split("\n\n") {
-        if out.chars().count() + para.chars().count() + 2 > limit.saturating_sub(4) {
-            break;
+        if c == '['
+            && let Some((label, url, next)) = link_at(&chars, i)
+        {
+            out.push_str(&format!("{} ({url})", unescape_v2(&label)));
+            i = next;
+            continue;
         }
-        if !out.is_empty() {
-            out.push_str("\n\n");
+        if !matches!(c, '*' | '_' | '~') {
+            out.push(c);
         }
-        out.push_str(para);
+        i += 1;
     }
-    if out.is_empty() {
-        out = crate::util::truncate_chars(md, limit.saturating_sub(4));
-    }
-    out.push_str("\n\n…");
     out
 }
 
-/// Close an unterminated code fence so a partial draft still parses.
-pub fn close_open_fence(md: &str) -> String {
-    let fences = md
-        .lines()
-        .filter(|l| l.trim_start().starts_with("```"))
-        .count();
-    if fences % 2 == 1 {
-        format!("{md}\n```")
+/// The code starting at the backtick at `i` (inline or fenced), unescaped,
+/// and the index after its closing backticks.
+fn code_span(chars: &[char], i: usize) -> (String, usize) {
+    let fence = chars[i..].starts_with(&['`', '`', '`']);
+    let (mut j, close) = if fence {
+        // Skip the opening fence and its language tag.
+        let mut j = i + 3;
+        while j < chars.len() && chars[j] != '\n' {
+            j += 1;
+        }
+        (j + 1, 3)
     } else {
-        md.to_string()
+        (i + 1, 1)
+    };
+    let mut code = String::new();
+    while j < chars.len() && !chars[j..].starts_with(&['`', '`', '`'][..close]) {
+        if chars[j] == '\\' && j + 1 < chars.len() {
+            code.push(chars[j + 1]);
+            j += 2;
+        } else {
+            code.push(chars[j]);
+            j += 1;
+        }
     }
+    if fence && code.ends_with('\n') {
+        code.pop();
+    }
+    (code, (j + close).min(chars.len()))
+}
+
+/// A MarkdownV2 link `[label](url)` at `i`: the raw label, the unescaped URL
+/// and the index after `)`. Escaped brackets (`\[`) never start or end a link.
+fn link_at(chars: &[char], i: usize) -> Option<(String, String, usize)> {
+    let mut j = i + 1;
+    while j < chars.len() && chars[j] != ']' {
+        match chars[j] {
+            '\\' => j += 2,
+            '`' => j = code_span(chars, j).1,
+            '\n' => return None,
+            _ => j += 1,
+        }
+    }
+    if chars.get(j + 1) != Some(&'(') {
+        return None;
+    }
+    let label: String = chars[i + 1..j].iter().collect();
+    let mut url = String::new();
+    let mut k = j + 2;
+    while k < chars.len() && chars[k] != ')' {
+        if chars[k] == '\\' && k + 1 < chars.len() {
+            k += 1;
+        }
+        url.push(chars[k]);
+        k += 1;
+    }
+    (k < chars.len()).then_some((label, url, k + 1))
+}
+
+/// Rich Markdown cannot exceed the limit; cut at a block boundary without
+/// leaving a code fence open.
+pub fn clamp_rich(md: &str, limit: usize) -> String {
+    clamp_markdown(md, limit)
 }
 
 #[cfg(test)]
@@ -717,6 +615,29 @@ mod tests {
         let v2 = v2_sources(&s).unwrap();
         assert!(v2.starts_with("*Sources*\n• [Doc 1](https://a.b/c)"));
         assert!(v2_sources(&[]).is_none());
+    }
+
+    #[test]
+    fn plain_rendering_keeps_code_intact() {
+        let plain = markdown_to_plain(
+            "Use `snake_case` and `a*b`, see [docs](https://d.e).\n\n```py\nx = a*b_c  # ~[k](v)\n```\n\n| key_name | v |\n|---|---|\n| a_b | 1 |",
+        );
+        assert!(
+            plain.contains("Use snake_case and a*b, see docs (https://d.e)."),
+            "{plain}"
+        );
+        assert!(plain.contains("x = a*b_c  # ~[k](v)"), "{plain}");
+        assert!(
+            plain.contains("key_name") && plain.contains("a_b"),
+            "{plain}"
+        );
+        // Link text that is code.
+        assert_eq!(
+            markdown_to_plain("Use [`snake_case`](https://d.e) here."),
+            "Use snake_case (https://d.e) here."
+        );
+        // Escaped brackets are literal text, not a link.
+        assert_eq!(markdown_to_plain("a \\[b\\](c)"), "a [b](c)");
     }
 
     #[test]

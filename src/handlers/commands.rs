@@ -8,9 +8,9 @@ use frankenstein::types::{
 
 use crate::app::BotContext;
 use crate::handlers::{chat, groups, message};
-use crate::storage::{ChatScope, ChatStatePatch};
 use crate::telegram::raw::EphemeralMessageParameters;
 use crate::telegram::render::escape_v2;
+use docsgpt_bot::{Scope, StatePatch};
 
 /// Extract `(command, args)` when the message starts with a command for this bot.
 pub fn parse(msg: &Message, username: &str) -> Option<(String, String)> {
@@ -80,13 +80,8 @@ pub fn agents_keyboard(ctx: &BotContext, active: &str) -> ReplyMarkup {
     )
 }
 
-pub async fn active_agent_name(ctx: &BotContext, scope: &ChatScope) -> String {
-    let st = ctx
-        .app
-        .storage
-        .get_chat_state(scope)
-        .await
-        .unwrap_or_default();
+pub async fn active_agent_name(ctx: &BotContext, scope: &Scope) -> String {
+    let st = ctx.app.storage.chat_state(scope).await.unwrap_or_default();
     st.active_agent
         .filter(|a| ctx.cfg.agent(a).is_some())
         .unwrap_or_else(|| ctx.cfg.default_agent().name.clone())
@@ -179,7 +174,7 @@ pub async fn handle(
                     .storage
                     .update_chat_state(
                         &scope,
-                        ChatStatePatch::active_agent(Some(&name.to_ascii_lowercase())),
+                        StatePatch::active_agent(Some(&name.to_ascii_lowercase())),
                     )
                     .await?;
             }
@@ -252,7 +247,7 @@ pub async fn handle(
                 Some(a) => {
                     ctx.app
                         .storage
-                        .update_chat_state(&scope, ChatStatePatch::active_agent(Some(&a.name)))
+                        .update_chat_state(&scope, StatePatch::active_agent(Some(&a.name)))
                         .await?;
                     reply(
                         ctx,
@@ -293,13 +288,13 @@ pub async fn handle(
             reply(ctx, msg, ephemeral_id, &escape_v2(&text), None).await
         }
         "regen" | "regenerate" => {
-            let st = ctx
-                .app
-                .storage
-                .get_chat_state(&scope)
-                .await
-                .unwrap_or_default();
-            match st.last_question {
+            let st = ctx.app.storage.chat_state(&scope).await.unwrap_or_default();
+            match st
+                .extra
+                .get("last_question")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            {
                 Some(q) => chat::ask_from_message(ctx, msg, q, vec![], None).await,
                 None => {
                     reply(

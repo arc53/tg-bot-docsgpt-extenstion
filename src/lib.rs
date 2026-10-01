@@ -1,9 +1,8 @@
-//! Telegram bots for DocsGPT agents.
+//! Telegram bots for DocsGPT agents, built on `docsgpt-bot`.
 
 pub mod app;
 pub mod config;
-pub mod docsgpt;
 pub mod handlers;
-pub mod storage;
+pub mod surface;
 pub mod telegram;
 pub mod util;

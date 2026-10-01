@@ -6,9 +6,10 @@ use serde_json::Value;
 
 use crate::app::BotContext;
 use crate::config::GroupMode;
+use crate::handlers::chat::UserInfo;
 use crate::handlers::{attachments, chat, commands, groups};
-use crate::storage::{ChatScope, UserInfo};
 use crate::telegram::api::Target;
+use docsgpt_bot::Scope;
 
 pub fn user_info(msg: &Message) -> Option<UserInfo> {
     msg.from.as_ref().map(|u| UserInfo {
@@ -36,10 +37,17 @@ pub fn target_for(msg: &Message) -> Target {
     }
 }
 
-pub fn scope_for(ctx: &BotContext, msg: &Message) -> ChatScope {
+/// Where a message's conversation lives: `bot[:biz:<connection>]:chat:thread`
+/// (the same keys version 2 stored).
+pub fn scope_for(ctx: &BotContext, msg: &Message) -> Scope {
     match &msg.business_connection_id {
-        Some(bc) => ChatScope::business(&ctx.cfg.name, msg.chat.id, bc),
-        None => ChatScope::new(&ctx.cfg.name, msg.chat.id, groups::thread_id(msg)),
+        Some(bc) => Scope::new(&ctx.cfg.name, msg.chat.id.to_string(), "0")
+            .with_namespace(format!("biz:{bc}")),
+        None => Scope::new(
+            &ctx.cfg.name,
+            msg.chat.id.to_string(),
+            groups::thread_id(msg).unwrap_or(0).to_string(),
+        ),
     }
 }
 

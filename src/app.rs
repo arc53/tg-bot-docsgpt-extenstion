@@ -1,22 +1,22 @@
 //! Shared state for the process and for each bot.
 
 use anyhow::{Context, Result};
+use docsgpt_bot::{Agents, BotCore, CancelRegistry, Shutdown, Storage};
 use frankenstein::types::{BotCommand, BotCommandScope, User};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, OwnedMutexGuard};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::Mutex;
 
 use crate::config::{BotConfig, Config};
-use crate::docsgpt::DocsGpt;
-use crate::storage::Storage;
 use crate::telegram::Tg;
 
 pub struct AppState {
     pub cfg: Config,
     pub storage: Arc<dyn Storage>,
     pub http: reqwest::Client,
-    pub shutdown: CancellationToken,
+    /// Process lifetime: polling loops watch its token; handlers are spawned on
+    /// it so shutdown can let answers in progress finish.
+    pub shutdown: Shutdown,
 }
 
 pub struct BotContext {
@@ -24,9 +24,10 @@ pub struct BotContext {
     pub cfg: BotConfig,
     pub tg: Tg,
     pub me: User,
-    pub docsgpt: DocsGpt,
-    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    cancels: Mutex<HashMap<(i64, i32, i64), CancellationToken>>,
+    /// DocsGPT client, agents, storage and per-chat locks.
+    pub core: BotCore,
+    /// Running drafts the user can stop, by `"{chat}:{thread}:{draft}"`.
+    pub cancels: CancelRegistry,
     pub media_groups: Mutex<HashMap<String, Vec<frankenstein::types::Message>>>,
 }
 
@@ -38,22 +39,30 @@ impl BotContext {
             .get_me()
             .await
             .with_context(|| format!("bot {:?}: token rejected by Telegram", cfg.name))?;
-        let docsgpt = DocsGpt::new(app.http.clone(), cfg.api_base(&app.cfg.api_base));
+        let client = docsgpt_bot::docsgpt::Client::builder(cfg.api_base(&app.cfg.api_base))
+            .http_client(app.http.clone())
+            .build()
+            .context("DocsGPT client")?;
         tracing::info!(
             bot = %cfg.name,
             username = %me.username.clone().unwrap_or_default(),
             agents = ?cfg.agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            docsgpt = docsgpt.base(),
+            docsgpt = client.base_url(),
             "bot ready"
+        );
+        let core = BotCore::new(
+            cfg.name.clone(),
+            client,
+            Agents::new(cfg.agents.clone())?,
+            app.storage.clone(),
         );
         let ctx = Arc::new(Self {
             app,
             cfg,
             tg,
             me,
-            docsgpt,
-            locks: Mutex::new(HashMap::new()),
-            cancels: Mutex::new(HashMap::new()),
+            core,
+            cancels: CancelRegistry::default(),
             media_groups: Mutex::new(HashMap::new()),
         });
         ctx.push_profile().await;
@@ -68,51 +77,9 @@ impl BotContext {
         &self.me.first_name
     }
 
-    /// Serialize work per conversation scope so turns don't interleave.
-    pub async fn lock_scope(&self, key: &str) -> OwnedMutexGuard<()> {
-        let m = {
-            let mut map = self.locks.lock().await;
-            if map.len() > 5000 {
-                map.retain(|_, v| Arc::strong_count(v) > 1);
-            }
-            map.entry(key.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        m.lock_owned().await
-    }
-
-    pub async fn register_cancel(
-        &self,
-        chat_id: i64,
-        thread_id: i32,
-        draft_id: i64,
-    ) -> CancellationToken {
-        let token = CancellationToken::new();
-        self.cancels
-            .lock()
-            .await
-            .insert((chat_id, thread_id, draft_id), token.clone());
-        token
-    }
-
-    pub async fn unregister_cancel(&self, chat_id: i64, thread_id: i32, draft_id: i64) {
-        self.cancels
-            .lock()
-            .await
-            .remove(&(chat_id, thread_id, draft_id));
-    }
-
-    /// Called from a `stopped_message_generation` update.
-    pub async fn cancel_generation(&self, chat_id: i64, thread_id: i32, draft_id: i64) -> bool {
-        let map = self.cancels.lock().await;
-        match map.get(&(chat_id, thread_id, draft_id)) {
-            Some(t) => {
-                t.cancel();
-                true
-            }
-            None => false,
-        }
+    /// Key under which a draft's Stop is registered.
+    pub fn cancel_key(chat_id: i64, thread_id: i32, draft_id: i64) -> String {
+        format!("{chat_id}:{thread_id}:{draft_id}")
     }
 
     /// Commands, descriptions and menu button — best effort, logged on failure.

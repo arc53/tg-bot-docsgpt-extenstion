@@ -10,6 +10,9 @@ pub mod guest;
 pub mod inline;
 pub mod message;
 
+use docsgpt_bot::docsgpt::Feedback;
+use docsgpt_bot::submit_feedback;
+use frankenstein::types::{MessageReactionUpdated, ReactionType};
 use frankenstein::updates::UpdateContent;
 use std::sync::Arc;
 
@@ -19,9 +22,9 @@ use crate::telegram::raw::Incoming;
 pub async fn dispatch(ctx: Arc<BotContext>, incoming: Incoming) {
     let result = match incoming {
         Incoming::StoppedGeneration(s) => {
-            let hit = ctx
-                .cancel_generation(s.chat.id, s.message_thread_id.unwrap_or(0), s.draft_id)
-                .await;
+            let key =
+                BotContext::cancel_key(s.chat.id, s.message_thread_id.unwrap_or(0), s.draft_id);
+            let hit = ctx.cancels.cancel(&key);
             tracing::info!(bot = %ctx.cfg.name, chat = s.chat.id, draft = s.draft_id, hit, "user stopped generation");
             Ok(())
         }
@@ -32,18 +35,7 @@ pub async fn dispatch(ctx: Arc<BotContext>, incoming: Incoming) {
             UpdateContent::GuestMessage(m) => guest::handle(&ctx, *m).await,
             UpdateContent::CallbackQuery(q) => callbacks::handle(&ctx, *q).await,
             UpdateContent::InlineQuery(q) => inline::handle(&ctx, q).await,
-            UpdateContent::MessageReaction(r) => {
-                let emoji: Vec<String> = r
-                    .new_reaction
-                    .iter()
-                    .filter_map(|x| match x {
-                        frankenstein::types::ReactionType::Emoji(e) => Some(e.emoji.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                tracing::info!(bot = %ctx.cfg.name, chat = r.chat.id, message = r.message_id, ?emoji, "reaction feedback");
-                Ok(())
-            }
+            UpdateContent::MessageReaction(r) => reaction_feedback(&ctx, &r).await,
             UpdateContent::MyChatMember(m) => {
                 tracing::info!(bot = %ctx.cfg.name, chat = m.chat.id, status = ?m.new_chat_member, "membership changed");
                 Ok(())
@@ -55,4 +47,34 @@ pub async fn dispatch(ctx: Arc<BotContext>, incoming: Incoming) {
     if let Err(e) = result {
         tracing::error!(bot = %ctx.cfg.name, error = ?e, "update handling failed");
     }
+}
+
+fn thumbs(list: &[ReactionType]) -> Option<Feedback> {
+    list.iter().find_map(|x| match x {
+        ReactionType::Emoji(e) if e.emoji == "👍" => Some(Feedback::Like),
+        ReactionType::Emoji(e) if e.emoji == "👎" => Some(Feedback::Dislike),
+        _ => None,
+    })
+}
+
+/// 👍/👎 on an answer becomes DocsGPT feedback on that answer; taking the
+/// reaction back clears it. Other reactions are ignored.
+async fn reaction_feedback(
+    ctx: &Arc<BotContext>,
+    r: &MessageReactionUpdated,
+) -> anyhow::Result<()> {
+    let feedback = match (thumbs(&r.new_reaction), thumbs(&r.old_reaction)) {
+        (Some(f), _) => f,
+        (None, Some(_)) => Feedback::Clear,
+        (None, None) => return Ok(()),
+    };
+    let message = format!("{}:{}", r.chat.id, r.message_id);
+    match submit_feedback(&ctx.core, &message, feedback).await {
+        Ok(true) => tracing::info!(bot = %ctx.cfg.name, %message, ?feedback, "feedback sent"),
+        Ok(false) => {
+            tracing::debug!(%message, "reaction on a message that holds no rateable answer")
+        }
+        Err(e) => tracing::warn!(error = %e, %message, "feedback failed"),
+    }
+    Ok(())
 }

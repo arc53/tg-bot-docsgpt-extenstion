@@ -16,7 +16,7 @@ pub async fn run_polling(ctx: Arc<BotContext>) {
     tracing::info!(bot = %ctx.cfg.name, username = %ctx.me.username.clone().unwrap_or_default(), "polling for updates");
     loop {
         let updates = tokio::select! {
-            _ = ctx.app.shutdown.cancelled() => break,
+            _ = ctx.app.shutdown.token().cancelled() => break,
             r = ctx.tg.get_updates_raw(offset, 30) => r,
         };
         match updates {
@@ -26,15 +26,15 @@ pub async fn run_polling(ctx: Arc<BotContext>) {
                     let (update_id, incoming) = raw::parse_update(v);
                     offset = Some(update_id + 1);
                     let ctx = ctx.clone();
-                    tokio::spawn(async move {
-                        handlers::dispatch(ctx, incoming).await;
-                    });
+                    // Tracked, so shutdown lets answers in progress finish.
+                    let app = ctx.app.clone();
+                    app.shutdown.spawn(handlers::dispatch(ctx, incoming));
                 }
             }
             Err(e) => {
                 tracing::warn!(bot = %ctx.cfg.name, error = %format!("{e:#}"), "getUpdates failed; retrying in {:?}", backoff);
                 tokio::select! {
-                    _ = ctx.app.shutdown.cancelled() => break,
+                    _ = ctx.app.shutdown.token().cancelled() => break,
                     _ = tokio::time::sleep(backoff) => {}
                 }
                 backoff = (backoff * 2).min(Duration::from_secs(30));

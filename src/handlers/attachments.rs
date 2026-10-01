@@ -8,6 +8,15 @@ use std::time::Duration;
 use crate::app::BotContext;
 use crate::handlers::{chat, groups, message};
 use crate::util;
+use docsgpt_bot::docsgpt::Upload;
+
+fn upload(filename: &str, bytes: bytes::Bytes, mime: Option<&str>) -> Upload {
+    let u = Upload::new(filename, bytes);
+    match mime {
+        Some(m) => u.mime(m),
+        None => u,
+    }
+}
 
 pub fn has_media(msg: &Message) -> bool {
     msg.photo.is_some()
@@ -115,8 +124,12 @@ async fn process(ctx: &Arc<BotContext>, batch: Vec<Message>, caption: String) ->
         // Fast path: transcribe, then ask the transcript as a normal question.
         // Fallback: DocsGPT's attachment pipeline also understands audio.
         let (question, attachments) = match ctx
-            .docsgpt
-            .stt(&agent.api_key, &filename, bytes.clone(), mime.as_deref())
+            .core
+            .client
+            .stt(
+                &agent.api_key,
+                &upload(&filename, bytes.clone(), mime.as_deref()),
+            )
             .await
         {
             Ok(transcript) => (
@@ -130,23 +143,27 @@ async fn process(ctx: &Arc<BotContext>, batch: Vec<Message>, caption: String) ->
             Err(e) => {
                 tracing::warn!(error = %e, "speech-to-text failed; sending the audio as an attachment instead");
                 match ctx
-                    .docsgpt
-                    .store_attachment(&agent.api_key, &filename, bytes, mime.as_deref())
+                    .core
+                    .client
+                    .upload_attachment(&agent.api_key, &upload(&filename, bytes, mime.as_deref()))
                     .await
                 {
                     Ok(stored) => {
-                        if let Some(task) = &stored.task_id {
-                            ctx.docsgpt
+                        if let Some(task) = &stored.task_id
+                            && let Err(e) = ctx
+                                .core
+                                .client
                                 .wait_for_task(task, Duration::from_secs(60))
                                 .await
-                                .unwrap_or_else(|e| tracing::warn!(error = %e, "attachment task"));
+                        {
+                            tracing::warn!(error = %e, "attachment task");
                         }
                         let q = if caption.is_empty() {
                             "Please answer the question in the attached voice message.".to_string()
                         } else {
                             format!("{caption}\n\n(See the attached voice message.)")
                         };
-                        (q, vec![stored.attachment_id])
+                        (q, vec![stored.id])
                     }
                     Err(e2) => {
                         tracing::warn!(error = %e2, "audio attachment upload failed");
@@ -169,9 +186,9 @@ async fn process(ctx: &Arc<BotContext>, batch: Vec<Message>, caption: String) ->
                 scope,
                 target,
                 user: message::user_info(&first),
-                question,
+                text: question,
                 attachments,
-                agent,
+                agent: Some(agent.name.clone()),
                 delivery,
                 source_message_id: Some(first.message_id),
                 voice_reply: ctx.cfg.voice_replies,
@@ -206,18 +223,22 @@ async fn process(ctx: &Arc<BotContext>, batch: Vec<Message>, caption: String) ->
                 .map(str::to_string)
         });
         match ctx
-            .docsgpt
-            .store_attachment(&agent.api_key, &filename, bytes, mime.as_deref())
+            .core
+            .client
+            .upload_attachment(&agent.api_key, &upload(&filename, bytes, mime.as_deref()))
             .await
         {
             Ok(stored) => {
-                if let Some(task) = &stored.task_id {
-                    ctx.docsgpt
+                if let Some(task) = &stored.task_id
+                    && let Err(e) = ctx
+                        .core
+                        .client
                         .wait_for_task(task, Duration::from_secs(120))
                         .await
-                        .unwrap_or_else(|e| tracing::warn!(error = %e, "attachment task"));
+                {
+                    tracing::warn!(error = %e, "attachment task");
                 }
-                ids.push(stored.attachment_id);
+                ids.push(stored.id);
                 names.push(filename);
             }
             Err(e) => {
@@ -281,9 +302,9 @@ async fn process(ctx: &Arc<BotContext>, batch: Vec<Message>, caption: String) ->
             scope,
             target,
             user: message::user_info(&first),
-            question,
+            text: question,
             attachments: ids,
-            agent,
+            agent: Some(agent.name.clone()),
             delivery,
             source_message_id: Some(first.message_id),
             voice_reply: false,
@@ -312,7 +333,7 @@ fn pick_file(m: &Message) -> Option<(String, String, Option<String>)> {
             .max_by_key(|p| (p.file_size.unwrap_or(0), p.width))?;
         return Some((
             best.file_id.clone(),
-            format!("photo_{}.jpg", &best.file_unique_id),
+            format!("photo_{}.jpg", best.file_unique_id),
             Some("image/jpeg".into()),
         ));
     }

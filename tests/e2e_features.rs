@@ -298,7 +298,11 @@ async fn business_messages_are_answered_without_drafts() {
     while bot
         .app
         .storage
-        .get_business_link(bot.name(), "bc1")
+        .get_json(
+            bot.name(),
+            docsgpt_telegram::handlers::business::LINK_KIND,
+            "bc1",
+        )
         .await
         .unwrap()
         .is_none()

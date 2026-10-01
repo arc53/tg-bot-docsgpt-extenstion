@@ -5,12 +5,8 @@
 api_base = "https://gptcloud.arc53.com"   # your DocsGPT server for self-hosting
 
 [storage]
-backend = "sqlite"                         # sqlite (default) | mongodb | memory
+backend = "sqlite"                         # sqlite (default) | memory
 path = "data/docsgpt-telegram.db"
-# uri = "${MONGODB_URI}"                   # for backend = "mongodb"
-# db_name = "telegram_bot_memory"
-# collection = "telegram_bot_state"
-# legacy_collection = "chat_histories"     # v1 bot data, migrated on first use
 
 [server]                                   # only needed for webhook mode or /healthz
 enabled = false

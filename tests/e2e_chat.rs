@@ -82,7 +82,8 @@ async fn private_text_streams_drafts_then_final_with_sources_and_multi_turn() {
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].body["question"], json!("What is the answer?"));
     assert_eq!(first[0].body["api_key"], json!("key-default"));
-    assert_eq!(first[0].body["history"], json!("[]"));
+    // The conversation lives in DocsGPT; no client-side history is sent.
+    assert!(first[0].body.get("history").is_none());
     assert!(first[0].body["conversation_id"].is_null());
     assert!(first[0].body.get("attachments").is_none());
 
@@ -534,7 +535,8 @@ async fn stop_button_cancels_generation_promptly() {
     let pressed = Instant::now();
     tg.push(
         "stopped_message_generation",
-        json!({"chat": chat(CHAT, "private"), "draft_id": draft_id}),
+        // Telegram sends draft_id as a string (although documented as Integer).
+        json!({"chat": chat(CHAT, "private"), "draft_id": draft_id.to_string()}),
     );
 
     let final_msg = tg
@@ -546,7 +548,8 @@ async fn stop_button_cancels_generation_promptly() {
         took < Duration::from_secs(3),
         "final message arrived {took:?} after stop"
     );
-    assert_eq!(final_msg.markdown().trim(), "Partial answer");
+    // The partial answer stays, marked as stopped.
+    assert_eq!(final_msg.markdown().trim(), "Partial answer\n\n_Stopped._");
     assert!(!final_msg.markdown().contains("never arrives"));
     tg.rec
         .wait_for(

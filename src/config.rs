@@ -6,6 +6,20 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+pub use docsgpt_bot::config::{AgentConfig, Backend, StorageConfig};
+use docsgpt_bot::config::{
+    DEFAULT_API_BASE, agents_from_env, expand_env, find_config, normalize_name,
+};
+
+/// SQLite file used when the config names none.
+pub const DEFAULT_SQLITE_PATH: &str = "data/docsgpt-telegram.db";
+
+/// Shown when a config still asks for MongoDB.
+const MONGODB_REMOVED: &str = "MongoDB storage was removed in version 3. Conversations now live in \
+SQLite (the default; keep data/ on a volume) or in memory. Remove STORAGE_TYPE=mongodb and the MONGODB_* \
+variables, or `backend = \"mongodb\"` and the uri/db_name/collection keys under [storage]. Chats continue in \
+new DocsGPT conversations. See \"Upgrading to version 3\" in the README.";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -18,48 +32,6 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub bots: Vec<BotConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Backend {
-    Memory,
-    Sqlite,
-    Mongodb,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StorageConfig {
-    #[serde(default = "default_backend")]
-    pub backend: Backend,
-    /// SQLite file path.
-    #[serde(default = "default_sqlite_path")]
-    pub path: String,
-    /// MongoDB connection string.
-    #[serde(default)]
-    pub uri: Option<String>,
-    #[serde(default = "default_db_name")]
-    pub db_name: String,
-    /// Collection used by v2 for chat state and conversation ids.
-    #[serde(default = "default_collection")]
-    pub collection: String,
-    /// Collection written by the v1 Python bot; read once for migration.
-    #[serde(default = "default_legacy_collection")]
-    pub legacy_collection: String,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            backend: default_backend(),
-            path: default_sqlite_path(),
-            uri: None,
-            db_name: default_db_name(),
-            collection: default_collection(),
-            legacy_collection: default_legacy_collection(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,34 +134,8 @@ pub struct BotConfig {
     pub agents: Vec<AgentConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentConfig {
-    pub name: String,
-    pub api_key: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub default: bool,
-}
-
 fn default_api_base() -> String {
-    "https://gptcloud.arc53.com".into()
-}
-fn default_backend() -> Backend {
-    Backend::Sqlite
-}
-fn default_sqlite_path() -> String {
-    "data/docsgpt-telegram.db".into()
-}
-fn default_db_name() -> String {
-    "telegram_bot_memory".into()
-}
-fn default_collection() -> String {
-    "telegram_bot_state".into()
-}
-fn default_legacy_collection() -> String {
-    "chat_histories".into()
+    DEFAULT_API_BASE.into()
 }
 fn default_bind() -> String {
     "0.0.0.0:8080".into()
@@ -223,61 +169,49 @@ impl BotConfig {
     }
 }
 
-/// Expand `${VAR}` and `${VAR:-default}` references from the process environment.
-pub fn expand_env(input: &str) -> Result<String> {
-    let re = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").unwrap();
-    let mut missing = Vec::new();
-    let out = re.replace_all(input, |caps: &regex::Captures| {
-        let var = &caps[1];
-        match std::env::var(var) {
-            Ok(v) => v,
-            Err(_) => match caps.get(2) {
-                Some(d) => d.as_str().to_string(),
-                None => {
-                    missing.push(var.to_string());
-                    String::new()
-                }
-            },
-        }
-    });
-    if !missing.is_empty() {
-        bail!(
-            "missing environment variables referenced in config: {}",
-            missing.join(", ")
-        );
-    }
-    Ok(out.into_owned())
-}
-
 /// Load configuration. Order: explicit path → `DOCSGPT_TG_CONFIG` → `docsgpt-tg.toml`
 /// in the working directory → legacy environment variables.
 pub fn load(explicit: Option<&Path>) -> Result<Config> {
-    let candidate = explicit
-        .map(|p| p.to_path_buf())
-        .or_else(|| std::env::var_os("DOCSGPT_TG_CONFIG").map(Into::into))
-        .or_else(|| {
-            let p = Path::new("docsgpt-tg.toml");
-            p.exists().then(|| p.to_path_buf())
-        });
-
-    let mut cfg = match candidate {
+    let mut cfg = match find_config(explicit, "DOCSGPT_TG_CONFIG", "docsgpt-tg.toml") {
         Some(path) => {
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading config {}", path.display()))?;
-            let expanded = expand_env(&raw)?;
-            let cfg: Config = toml::from_str(&expanded)
-                .with_context(|| format!("parsing config {}", path.display()))?;
+            let cfg = parse(&raw).with_context(|| format!("parsing config {}", path.display()))?;
             tracing::info!(path = %path.display(), bots = cfg.bots.len(), "loaded config file");
             cfg
         }
         None => {
             let cfg = from_env()?;
-            tracing::info!("no config file found; using legacy environment variables");
+            tracing::info!("no config file found; using environment variables");
             cfg
         }
     };
     normalize(&mut cfg)?;
     Ok(cfg)
+}
+
+/// Expand `${VAR}` references and parse a TOML config.
+pub fn parse(raw: &str) -> Result<Config> {
+    // Before expanding ${VAR}: a leftover `${MONGODB_URI}` whose variable is
+    // already unset would otherwise fail with "missing environment variables".
+    static MONGO: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?m)^\s*backend\s*=\s*["']mongo(db)?["']|\$\{MONGODB_"#)
+            .expect("valid regex")
+    });
+    if MONGO.is_match(raw) {
+        bail!(MONGODB_REMOVED);
+    }
+    let expanded = expand_env(raw)?;
+    toml::from_str(&expanded).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("mongodb")
+            || (raw.contains("[storage]") && (msg.contains("`uri`") || msg.contains("`db_name`")))
+        {
+            anyhow!(MONGODB_REMOVED)
+        } else {
+            anyhow!(msg)
+        }
+    })
 }
 
 /// Build a single-bot config from the v1 environment layout.
@@ -286,35 +220,9 @@ pub fn from_env() -> Result<Config> {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| anyhow!("TELEGRAM_BOT_TOKEN is not set and no config file was found"))?;
-    let mut agents = Vec::new();
-    if let Ok(key) = std::env::var("API_KEY")
-        && !key.trim().is_empty()
-    {
-        agents.push(AgentConfig {
-            name: "default".into(),
-            api_key: key,
-            description: None,
-            default: true,
-        });
-    }
-    let mut extra: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k.starts_with("API_KEY_") && k.len() > 8)
-        .map(|(k, v)| (k[8..].to_ascii_lowercase(), v))
-        .collect();
-    extra.sort();
-    for (name, key) in extra {
-        agents.push(AgentConfig {
-            name,
-            api_key: key,
-            description: None,
-            default: false,
-        });
-    }
+    let agents = agents_from_env(std::env::vars());
     if agents.is_empty() {
         bail!("API_KEY (or API_KEY_<NAME>) is not set");
-    }
-    if !agents.iter().any(|a| a.default) {
-        agents[0].default = true;
     }
 
     let storage = match std::env::var("STORAGE_TYPE")
@@ -322,22 +230,14 @@ pub fn from_env() -> Result<Config> {
         .to_ascii_lowercase()
         .as_str()
     {
-        "mongodb" | "mongo" => StorageConfig {
-            backend: Backend::Mongodb,
-            uri: std::env::var("MONGODB_URI").ok(),
-            db_name: std::env::var("MONGODB_DB_NAME").unwrap_or_else(|_| default_db_name()),
-            legacy_collection: std::env::var("MONGODB_COLLECTION_NAME")
-                .unwrap_or_else(|_| default_legacy_collection()),
-            ..Default::default()
-        },
+        "mongodb" | "mongo" => bail!(MONGODB_REMOVED),
         "memory" => StorageConfig {
             backend: Backend::Memory,
-            ..Default::default()
+            path: None,
         },
         _ => StorageConfig {
             backend: Backend::Sqlite,
-            path: std::env::var("SQLITE_PATH").unwrap_or_else(|_| default_sqlite_path()),
-            ..Default::default()
+            path: std::env::var("SQLITE_PATH").ok(),
         },
     };
 
@@ -400,60 +300,19 @@ fn normalize(cfg: &mut Config) -> Result<()> {
     }
     let mut names = HashSet::new();
     for bot in &mut cfg.bots {
-        bot.name = bot.name.trim().to_ascii_lowercase();
-        if bot.name.is_empty()
-            || !bot
-                .name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            bail!(
-                "bot name {:?} must be alphanumeric with '-' or '_'",
-                bot.name
-            );
-        }
+        bot.name = normalize_name("bot", &bot.name)?;
         if !names.insert(bot.name.clone()) {
             bail!("duplicate bot name {:?}", bot.name);
         }
         if bot.token.trim().is_empty() {
             bail!("bot {:?}: token is empty", bot.name);
         }
-        if bot.agents.is_empty() {
-            bail!("bot {:?}: at least one agent is required", bot.name);
-        }
-        let mut agent_names = HashSet::new();
-        for a in &mut bot.agents {
-            a.name = a.name.trim().to_ascii_lowercase();
-            if a.name.is_empty()
-                || !a
-                    .name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                bail!(
-                    "bot {:?}: agent name {:?} must be alphanumeric with '-' or '_'",
-                    bot.name,
-                    a.name
-                );
-            }
-            if !agent_names.insert(a.name.clone()) {
-                bail!("bot {:?}: duplicate agent {:?}", bot.name, a.name);
-            }
-            if a.api_key.trim().is_empty() {
-                bail!(
-                    "bot {:?}: agent {:?} has an empty api_key",
-                    bot.name,
-                    a.name
-                );
-            }
-        }
-        let defaults = bot.agents.iter().filter(|a| a.default).count();
-        if defaults > 1 {
-            bail!("bot {:?}: more than one default agent", bot.name);
-        }
-        if defaults == 0 {
-            bot.agents[0].default = true;
-        }
+        // Names lowercased and unique, keys present, exactly one default.
+        bot.agents = docsgpt_bot::Agents::new(std::mem::take(&mut bot.agents))
+            .map_err(|e| anyhow!("bot {:?}: {e}", bot.name))?
+            .iter()
+            .cloned()
+            .collect();
         if bot.mode == Mode::Webhook {
             cfg.server.enabled = true;
             if cfg.server.public_url.is_none() {
@@ -464,15 +323,6 @@ fn normalize(cfg: &mut Config) -> Result<()> {
             }
         }
     }
-    if cfg.storage.backend == Backend::Mongodb
-        && cfg
-            .storage
-            .uri
-            .as_deref()
-            .is_none_or(|s| s.trim().is_empty())
-    {
-        bail!("storage.backend = mongodb requires storage.uri (or MONGODB_URI)");
-    }
     cfg.api_base = cfg.api_base.trim_end_matches('/').to_string();
     Ok(())
 }
@@ -482,14 +332,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expands_env_with_defaults() {
-        unsafe { std::env::set_var("DOCSGPT_TG_TEST_VAR", "abc") };
-        assert_eq!(expand_env("x ${DOCSGPT_TG_TEST_VAR} y").unwrap(), "x abc y");
-        assert_eq!(
-            expand_env("${DOCSGPT_TG_MISSING:-fallback}").unwrap(),
-            "fallback"
-        );
-        assert!(expand_env("${DOCSGPT_TG_MISSING_NO_DEFAULT}").is_err());
+    fn mongodb_settings_get_the_upgrade_message() {
+        let err = parse("[storage]\nbackend = \"mongodb\"\nuri = \"mongodb://x\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MongoDB storage was removed"), "{err}");
+        // Even when the Mongo variables are already gone from the environment.
+        let err = parse(
+            "[storage]\nbackend = \"mongodb\"\nuri = \"${DOCSGPT_TG_TEST_UNSET_MONGO_URI}\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("MongoDB storage was removed"), "{err}");
+        let ok = parse("[storage]\nbackend = \"memory\"\n").unwrap();
+        assert_eq!(ok.storage.backend, Backend::Memory);
     }
 
     #[test]
@@ -543,5 +399,23 @@ mod tests {
         "#;
         let mut cfg: Config = toml::from_str(toml).unwrap();
         assert!(normalize(&mut cfg).is_err());
+    }
+}
+
+#[cfg(test)]
+mod example_tests {
+    #[test]
+    fn example_config_parses() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docsgpt-tg.example.toml"
+        ))
+        .unwrap();
+        let raw = regex::Regex::new(r"\$\{[A-Z_]+\}")
+            .unwrap()
+            .replace_all(&raw, "placeholder");
+        let mut cfg: super::Config = toml::from_str(&raw).unwrap();
+        super::normalize(&mut cfg).unwrap();
+        assert!(!cfg.bots.is_empty());
     }
 }

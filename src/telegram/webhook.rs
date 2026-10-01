@@ -48,7 +48,8 @@ async fn webhook(
     };
     let (_, incoming) = raw::parse_update(body);
     let ctx = ctx.clone();
-    tokio::spawn(async move { handlers::dispatch(ctx, incoming).await });
+    let app = ctx.app.clone();
+    app.shutdown.spawn(handlers::dispatch(ctx, incoming));
     StatusCode::OK
 }
 
