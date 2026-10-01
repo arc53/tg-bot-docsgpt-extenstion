@@ -1,12 +1,14 @@
 [package]
 name = "docsgpt-telegram"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2024"
 description = "Telegram bots for DocsGPT agents: streaming answers, rich messages, attachments, multi-bot"
 license = "MIT"
 repository = "https://github.com/arc53/tg-bot-docsgpt-extenstion"
 
 [dependencies]
+docsgpt = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown" }
+docsgpt-bot = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown" }
 base64 = "0.22"
 anyhow = "1.0.104"
 async-trait = "0.1.92"
@@ -18,11 +20,9 @@ dotenvy = "0.15.7"
 frankenstein = { git = "https://github.com/ayrat555/frankenstein", rev = "2ffdb59b0e66b870ff3225b9882750ee710ad54c", default-features = false, features = ["client-reqwest"] }
 futures-util = "0.3.34"
 mime_guess = "2.0.5"
-mongodb = "3.8.2"
 pulldown-cmark = "0.13.4"
 rand = "0.10.2"
 regex = "1.13.1"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tempfile = "3.27.0"
@@ -41,6 +41,8 @@ codegen-units = 1
 strip = true
 
 [dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+docsgpt-bot = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown", features = ["testing"] }
 docsgpt = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown", features = ["mock"] }
 # The e2e mocks parse multipart uploads (sendDocument, store_attachment) with axum's extractor.
 axum = { version = "0.8.9", features = ["multipart"] }

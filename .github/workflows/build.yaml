@@ -12,8 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
 
   build:
@@ -63,9 +66,9 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/tg-bot-docsgpt-extenstion:latest-${{ matrix.suffix }}
-            ${{ secrets.DOCKER_USERNAME }}/tg-bot-docsgpt-extenstion:2-${{ matrix.suffix }}
+            ${{ secrets.DOCKER_USERNAME }}/tg-bot-docsgpt-extenstion:3-${{ matrix.suffix }}
             ghcr.io/${{ github.repository_owner }}/tg-bot-docsgpt-extenstion:latest-${{ matrix.suffix }}
-            ghcr.io/${{ github.repository_owner }}/tg-bot-docsgpt-extenstion:2-${{ matrix.suffix }}
+            ghcr.io/${{ github.repository_owner }}/tg-bot-docsgpt-extenstion:3-${{ matrix.suffix }}
           provenance: false
           sbom: false
           cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/tg-bot-docsgpt-extenstion:latest
@@ -100,7 +103,7 @@ jobs:
       - name: Create and push manifests
         run: |
           set -e
-          for tag in latest 2; do
+          for tag in latest 3; do
             docker manifest create ${{ secrets.DOCKER_USERNAME }}/tg-bot-docsgpt-extenstion:$tag \
               --amend ${{ secrets.DOCKER_USERNAME }}/tg-bot-docsgpt-extenstion:$tag-amd64 \
               --amend ${{ secrets.DOCKER_USERNAME }}/tg-bot-docsgpt-extenstion:$tag-arm64

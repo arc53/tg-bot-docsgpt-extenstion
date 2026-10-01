@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use docsgpt_bot::storage::MESSAGE_REF_KIND;
+use docsgpt_bot::{MESSAGE_REF_TTL, Shutdown};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 use docsgpt_telegram::app::{AppState, BotContext};
-use docsgpt_telegram::config::{self, Mode};
-use docsgpt_telegram::storage;
+use docsgpt_telegram::config::{self, DEFAULT_SQLITE_PATH, Mode};
 use docsgpt_telegram::telegram::{runtime, webhook};
 use docsgpt_telegram::util;
 
@@ -51,13 +51,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let cfg = config::load(cli.config.as_deref())?;
-    let storage = storage::open(&cfg.storage).await?;
+    let storage = docsgpt_bot::storage::open(&cfg.storage, DEFAULT_SQLITE_PATH).await?;
     let http = reqwest::Client::builder()
         .user_agent(format!("docsgpt-telegram/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
         .build()
         .context("building http client")?;
-    let shutdown = CancellationToken::new();
+    let shutdown = Shutdown::new();
     let app = Arc::new(AppState {
         cfg: cfg.clone(),
         storage,
@@ -83,10 +83,23 @@ async fn main() -> Result<()> {
 
     {
         let shutdown = shutdown.clone();
+        tokio::spawn(async move { shutdown.wait_for_signal().await });
+    }
+    {
+        // Message refs map an answer to its conversation for 👍/👎; drop old ones daily.
+        let (storage, token) = (app.storage.clone(), shutdown.token().clone());
         tokio::spawn(async move {
-            wait_for_signal().await;
-            tracing::info!("shutdown requested");
-            shutdown.cancel();
+            loop {
+                match storage.prune_json(MESSAGE_REF_KIND, MESSAGE_REF_TTL).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(pruned = n, "pruned old message refs"),
+                    Err(e) => tracing::warn!(error = %e, "pruning message refs failed"),
+                }
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(24 * 3600)) => {}
+                }
+            }
         });
     }
 
@@ -122,7 +135,7 @@ async fn main() -> Result<()> {
             secret,
         };
         let bind = cfg.server.bind.clone();
-        let sd = shutdown.clone();
+        let sd = shutdown.token().clone();
         tasks.push(tokio::spawn(async move {
             if let Err(e) = webhook::serve(&bind, state, sd).await {
                 tracing::error!(error = %e, "http server failed");
@@ -133,22 +146,10 @@ async fn main() -> Result<()> {
     for t in tasks {
         let _ = t.await;
     }
+    // Polling and the server have stopped; let answers in progress finish.
+    if !shutdown.drain(Duration::from_secs(30)).await {
+        tracing::warn!("some answers were cut off by shutdown");
+    }
     tracing::info!("bye");
     Ok(())
-}
-
-async fn wait_for_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("sigterm handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
 }

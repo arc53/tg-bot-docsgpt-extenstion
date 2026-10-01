@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::BotContext;
-use crate::docsgpt::StreamRequest;
 use crate::telegram::render;
 use crate::util;
+use docsgpt_bot::docsgpt::AskRequest;
 
 fn article(
     id: &str,
@@ -62,14 +62,22 @@ pub async fn handle(ctx: &Arc<BotContext>, q: InlineQuery) -> Result<()> {
         },
         None => (ctx.cfg.default_agent().clone(), query.clone()),
     };
-    let req = StreamRequest {
-        question: question.clone(),
-        api_key: agent.api_key.clone(),
-        conversation_id: None,
-        attachments: vec![],
-    };
-    let result = match ctx.docsgpt.answer(&req, Duration::from_secs(25)).await {
-        Ok(r) => r,
+    let req = AskRequest::new(&agent.api_key, &question);
+    let answered =
+        tokio::time::timeout(Duration::from_secs(25), ctx.core.client.answer(&req)).await;
+    let result = match answered {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "inline answer failed");
+            let err = article(
+                "error",
+                "Couldn't get an answer right now",
+                Some("Try again in a moment"),
+                &query,
+                None,
+            );
+            return ctx.tg.answer_inline_query(&q.id, vec![err]).await;
+        }
         Err(e) => {
             tracing::warn!(error = %e, "inline answer failed");
             let err = article(

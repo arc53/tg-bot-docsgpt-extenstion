@@ -5,9 +5,9 @@ use frankenstein::ParseMode;
 use frankenstein::types::{CallbackQuery, MaybeInaccessibleMessage};
 
 use crate::app::BotContext;
-use crate::handlers::{chat, commands, groups, message};
-use crate::storage::{ChatScope, ChatStatePatch};
+use crate::handlers::{chat, commands, message};
 use crate::telegram::render::escape_v2;
+use docsgpt_bot::StatePatch;
 
 pub async fn handle(ctx: &std::sync::Arc<BotContext>, q: CallbackQuery) -> Result<()> {
     let data = q.data.clone().unwrap_or_default();
@@ -19,17 +19,14 @@ pub async fn handle(ctx: &std::sync::Arc<BotContext>, q: CallbackQuery) -> Resul
         ctx.tg.answer_callback(&q.id, None).await?;
         return Ok(());
     };
-    let scope = match &msg.business_connection_id {
-        Some(bc) => ChatScope::business(&ctx.cfg.name, msg.chat.id, bc),
-        None => ChatScope::new(&ctx.cfg.name, msg.chat.id, groups::thread_id(&msg)),
-    };
+    let scope = message::scope_for(ctx, &msg);
 
     if let Some(name) = data.strip_prefix("agent:") {
         match ctx.cfg.agent(name) {
             Some(a) => {
                 ctx.app
                     .storage
-                    .update_chat_state(&scope, ChatStatePatch::active_agent(Some(&a.name)))
+                    .update_chat_state(&scope, StatePatch::active_agent(Some(&a.name)))
                     .await?;
                 ctx.tg
                     .answer_callback(&q.id, Some(&format!("Switched to {}", a.name)))
@@ -75,13 +72,13 @@ pub async fn handle(ctx: &std::sync::Arc<BotContext>, q: CallbackQuery) -> Resul
         }
         "regen" => {
             ctx.tg.answer_callback(&q.id, None).await?;
-            let st = ctx
-                .app
-                .storage
-                .get_chat_state(&scope)
-                .await
-                .unwrap_or_default();
-            if let Some(question) = st.last_question {
+            let st = ctx.app.storage.chat_state(&scope).await.unwrap_or_default();
+            if let Some(question) = st
+                .extra
+                .get("last_question")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            {
                 // Re-ask on behalf of the user who pressed the button.
                 let mut m = msg.clone();
                 m.from = Some(Box::new(q.from.clone()));

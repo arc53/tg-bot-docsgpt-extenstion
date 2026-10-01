@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use crate::app::BotContext;
 use crate::handlers::{chat, groups, message};
-use crate::storage::ChatScope;
 use crate::telegram::api::Target;
+use docsgpt_bot::Scope;
 
 pub async fn handle(ctx: &Arc<BotContext>, msg: Message) -> Result<()> {
     if !ctx.cfg.guest {
@@ -30,28 +30,17 @@ pub async fn handle(ctx: &Arc<BotContext>, msg: Message) -> Result<()> {
             .await?;
         return Ok(());
     }
-    let scope = ChatScope::guest(&ctx.cfg.name, msg.chat.id, user.id);
-    let (agent, question) = match chat::resolve_agent(ctx, &scope, &text).await {
-        Ok(v) => v,
-        Err(reply) => {
-            ctx.tg
-                .answer_guest_query(&guest_query_id, &reply, None)
-                .await?;
-            return Ok(());
-        }
-    };
-    if question.is_empty() {
-        return Ok(());
-    }
+    let scope = Scope::new(&ctx.cfg.name, msg.chat.id.to_string(), "0")
+        .with_namespace(format!("guest:{}", user.id));
     chat::ask(
         ctx,
         chat::Ask {
             scope,
             target: Target::chat(msg.chat.id),
             user: message::user_info(&msg),
-            question,
+            text,
             attachments: vec![],
-            agent,
+            agent: None,
             delivery: chat::Delivery::Guest { guest_query_id },
             source_message_id: None,
             voice_reply: false,

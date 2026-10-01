@@ -22,12 +22,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
+use docsgpt_bot::Storage;
+use docsgpt_bot::storage::memory::MemoryStorage;
 use docsgpt_telegram::app::{AppState, BotContext};
 use docsgpt_telegram::config::{
     AgentConfig, BotConfig, Config, GroupMode, Mode, ServerConfig, StorageConfig,
 };
-use docsgpt_telegram::storage::Storage;
-use docsgpt_telegram::storage::memory::MemoryStorage;
 use docsgpt_telegram::telegram::runtime;
 
 /// Generous default for waiting on the recorders.
@@ -66,11 +66,12 @@ impl CallExt for Call {
         self.body["text"].as_str().unwrap_or("").to_string()
     }
     fn markdown(&self) -> String {
-        self.body["rich_message"]["markdown"].as_str().unwrap_or("").to_string()
+        self.body["rich_message"]["markdown"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Mock Telegram Bot API
@@ -259,6 +260,8 @@ fn message_result(bot: &TgBot, body: &Value) -> Value {
     } else if let Some(md) = body.pointer("/rich_message/markdown") {
         m["text"] = md.clone();
     }
+    // Log the id handed out, so tests can react to a message the bot sent.
+    bot.rec.record(Call::new("sent", m.clone()));
     m
 }
 
@@ -406,7 +409,6 @@ pub fn ev_error(message: &str) -> Value {
     docsgpt::mock::ev::error(message)
 }
 
-
 // ---------------------------------------------------------------------------
 // Running the real bot
 // ---------------------------------------------------------------------------
@@ -477,13 +479,22 @@ impl TestBot {
 
 impl Drop for TestBot {
     fn drop(&mut self) {
-        self.app.shutdown.cancel();
+        self.app.shutdown.trigger();
     }
 }
 
 /// Boot the real bot: `BotContext::init` (getMe, setMyCommands, …) then the
 /// long-polling loop, exactly as `main.rs` does.
 pub async fn start_bot(cfg: BotConfig, docs: &Arc<DocsMock>) -> TestBot {
+    start_bot_with_storage(cfg, docs, Arc::new(MemoryStorage::default())).await
+}
+
+/// [`start_bot`] with a given storage backend (e.g. a SQLite file from v2).
+pub async fn start_bot_with_storage(
+    cfg: BotConfig,
+    docs: &Arc<DocsMock>,
+    storage: Arc<dyn Storage>,
+) -> TestBot {
     let server = telegram();
     let tg = server.bot(&cfg.token);
     let http = reqwest::Client::builder()
@@ -491,8 +502,7 @@ pub async fn start_bot(cfg: BotConfig, docs: &Arc<DocsMock>) -> TestBot {
         .user_agent("docsgpt-telegram-e2e")
         .build()
         .expect("http client");
-    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::default());
-    let shutdown = tokio_util::sync::CancellationToken::new();
+    let shutdown = docsgpt_bot::Shutdown::new();
     let app = Arc::new(AppState {
         cfg: Config {
             api_base: docs.url.clone(),
@@ -513,6 +523,36 @@ pub async fn start_bot(cfg: BotConfig, docs: &Arc<DocsMock>) -> TestBot {
         app,
         tg,
         docs: docs.clone(),
+    }
+}
+
+impl TestBot {
+    /// The id the mock gave the bot's message whose text contains `needle`.
+    pub async fn sent_message_id(&self, needle: &str) -> i64 {
+        let c = self
+            .tg
+            .rec
+            .wait_for(
+                "sent",
+                |c| c.body["text"].as_str().is_some_and(|t| t.contains(needle)),
+                WAIT,
+            )
+            .await;
+        c.body["message_id"].as_i64().unwrap()
+    }
+
+    /// The user reacts to message `message_id` in the default private chat.
+    pub fn push_reaction(&self, message_id: i64, old: &[&str], new: &[&str]) -> i64 {
+        let emoji = |l: &[&str]| {
+            l.iter()
+                .map(|e| json!({"type": "emoji", "emoji": e}))
+                .collect::<Vec<_>>()
+        };
+        self.tg.push(
+            "message_reaction",
+            json!({"chat": chat(CHAT, "private"), "message_id": message_id, "user": user(USER, "Alice"), "date": 1,
+                   "old_reaction": emoji(old), "new_reaction": emoji(new)}),
+        )
     }
 }
 

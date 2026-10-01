@@ -2,7 +2,7 @@
 
 Telegram bots for your [DocsGPT](https://www.docsgpt.cloud/) agents. One small binary runs any number of bots, each connected to one or more agents, with the answer experience Telegram now supports for AI bots: live streamed drafts with a Stop button, rich formatted answers (headings, tables, code, math), collapsible sources, file and photo input, voice notes, and files that your agent's tools produce sent back into the chat.
 
-Version 2 is a rewrite in Rust. The Python bot lives on the [`legacy-python`](https://github.com/arc53/tg-bot-docsgpt-extenstion/tree/legacy-python) branch and the `:1` image tag; existing `.env` files keep working unchanged.
+Version 3 runs on [`docsgpt-rs`](https://github.com/arc53/docsgpt-rs), the Rust crates shared with the [Slack bot](https://github.com/arc53/slack-bot-docsgpt-extenstion). Version 2 was the first Rust version; the Python bot lives on the [`legacy-python`](https://github.com/arc53/tg-bot-docsgpt-extenstion/tree/legacy-python) branch and the `:1` image tag. See [Upgrading to version 3](#upgrading-to-version-3).
 
 ## Features
 
@@ -16,8 +16,8 @@ Version 2 is a rewrite in Rust. The Python bot lives on the [`legacy-python`](ht
 - **Telegram Business** — answer customers inside a connected business account's chats.
 - **Guest mode** — answer when mentioned in chats the bot is not a member of.
 - **Inline mode** — `@yourbot question?` from any chat.
-- **Reactions** — 👀 while working; thumbs up/down on answers are logged as feedback.
-- **Polling or webhooks**, `/healthz`, structured logs, SQLite by default (MongoDB or in-memory optional), a small distroless container image for amd64 and arm64.
+- **Feedback** — react 👍 or 👎 to an answer and DocsGPT records it for that exact answer; take the reaction back to clear it. The bot shows 👀 while it works.
+- **Polling or webhooks**, `/healthz`, structured logs, SQLite by default (or in memory), graceful shutdown that lets answers finish, a small distroless container image for amd64 and arm64.
 
 ## Quick start
 
@@ -46,7 +46,7 @@ cargo build --release
 ./target/release/docsgpt-telegram
 ```
 
-Rust 1.85 or newer is required to build.
+Rust 1.88 or newer is required to build.
 
 ## Configuration
 
@@ -61,7 +61,7 @@ Same variables as version 1. Put them in `.env` next to the binary or pass them 
 | `API_KEY_<NAME>` | Additional agents, addressable as `#name` or via `/agent name`. |
 | `API_BASE` | DocsGPT server URL (default `https://gptcloud.arc53.com`). |
 | `SQLITE_PATH` | SQLite file (default `data/docsgpt-telegram.db`; `/app/data/…` in Docker). |
-| `STORAGE_TYPE` | `mongodb` or `memory` to override SQLite. With MongoDB: `MONGODB_URI`, `MONGODB_DB_NAME`, `MONGODB_COLLECTION_NAME` (the v1 collection, migrated on first use). |
+| `STORAGE_TYPE` | `memory` to keep state in memory instead of SQLite. |
 | `GROUPS_MODE` | `mention` (default), `all`, or `off`. |
 | `STREAMING` | `false` to disable live drafts. |
 | `VOICE_REPLIES` | `true` to answer voice notes with a voice note. |
@@ -106,10 +106,9 @@ In Docker, mount the file: `-v ./docsgpt-tg.toml:/app/docsgpt-tg.toml:ro`.
 
 ### Storage
 
-DocsGPT keeps the conversation transcript; the bot only stores which conversation each chat is in, the active agent, and business-connection details.
+DocsGPT keeps the conversation transcript; the bot only stores which conversation each chat is in, the active agent, which message holds which answer (for 👍/👎), and business-connection details.
 
 - `sqlite` (default) — a single file, kept in the `/app/data` volume in Docker.
-- `mongodb` — for shared deployments, or if you already ran version 1: conversations stored by the Python bot are picked up the first time a chat writes again.
 - `memory` — lost on restart; fine for trying things out.
 
 ### Webhook mode
@@ -133,26 +132,43 @@ The bot sets its command menu, description and menu button itself at startup (fr
 - Send a question. In private chats you'll see the answer stream in; press **Stop** to cut it short.
 - Send a **photo or document** (with an optional caption as the question) — it's uploaded to DocsGPT and the agent answers about it. Albums are handled as one question.
 - Send a **voice note** — it's transcribed and answered.
-- `/new` starts a fresh conversation with the current agent. `/agents` shows a picker, `/agent sales` switches, `#sales what's the price?` asks one agent just once.
+- `/new` starts a fresh conversation with the current agent. `/agents` shows a picker, `/agent sales` (or a message that is just `#sales`) switches, `#sales what's the price?` asks one agent just once.
+- React 👍 or 👎 to an answer to rate it (in groups, Telegram sends reactions to bots that are admins).
 - In groups: mention `@yourbot` or reply to one of its messages. Each forum topic keeps its own conversation.
 - Inline: type `@yourbot how do I reset my password?` in any chat and pick the answer.
 
+## Upgrading to version 3
+
+- **MongoDB is no longer supported.** Remove `STORAGE_TYPE=mongodb` and the `MONGODB_*` variables (or `backend = "mongodb"` and its `uri`/`db_name`/`collection` keys), and keep `/app/data` on a volume. The bot refuses to start with a Mongo setting and says what to change. Chats continue in new DocsGPT conversations.
+- **SQLite files from version 2 keep working:** conversations and chosen agents carry over. Feedback needs to know each answer's position in its conversation, which version 2 didn't count; reactions in those carried-over conversations are ignored until the chat starts a new one (`/new`).
+- **Image tags:** `:latest` and `:3` are version 3; `:2` stays on the last version 2 build.
+- **Small behaviour changes:**
+  - A message that is just `#agent` switches the chat's agent.
+  - An answer cut short by an error or **Stop** ends with a short note saying so.
+  - Error messages say whether the agent key was rejected, the assistant was busy, or it couldn't be reached.
+  - Plain-text answers keep `snake_case` and other symbols inside code.
+
 ## Upgrading from version 1
 
-- The `:1` image tag and the `legacy-python` branch keep the Python bot; `:latest` and `:2` are the Rust bot.
-- Your `.env` works as is. `STORAGE_TYPE=mongodb` deployments keep their MongoDB and migrate conversations lazily; deployments without `STORAGE_TYPE` now persist to SQLite instead of memory.
+- The `:1` image tag and the `legacy-python` branch keep the Python bot.
+- Your `.env` works as is, apart from MongoDB (see above). Deployments without `STORAGE_TYPE` persist to SQLite.
 - Answers now stream and render as rich messages; the `#agent` prefix still works and `/agents` is the new way to switch.
 
 ## Development
 
 ```bash
 cargo test                                     # unit + mock-server end-to-end tests
-DOCSGPT_LIVE_KEY=<agent key> cargo test --test docsgpt_live -- --ignored --nocapture   # against a real DocsGPT
 TELEGRAM_API_URL=http://localhost:8081 ...     # point the bot at a local Bot API server or a mock
 TG_RATE_LIMITS=off ...                         # disable outbound pacing (tests only)
 ```
 
-Layout: `src/config.rs` (TOML + env), `src/storage/` (memory, SQLite, MongoDB), `src/docsgpt/` (streaming client, attachments, speech, artifacts), `src/telegram/` (API wrapper, rendering, rate limits, polling/webhooks, raw params for the newest Bot API fields), `src/handlers/` (messages, commands, attachments, business, guest, inline, callbacks).
+The DocsGPT client, storage, agent routing and the answer loop come from the [`docsgpt`](https://crates.io/crates/docsgpt) and [`docsgpt-bot`](https://crates.io/crates/docsgpt-bot) crates; live tests against a real DocsGPT live there.
+
+Layout:
+- `src/config.rs`: TOML and environment config.
+- `src/surface.rs`: how an answer is drafted and delivered in Telegram.
+- `src/handlers/`: messages, commands, attachments, business, guest, inline, callbacks, reactions.
+- `src/telegram/`: the API wrapper, rendering, rate limits, polling and webhooks, and raw params for the newest Bot API fields.
 
 ## License
 
