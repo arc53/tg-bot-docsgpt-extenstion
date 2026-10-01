@@ -48,224 +48,29 @@ pub const TINY_PNG: &[u8] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Recorder
+// Recorder and request parsing: shared with the docsgpt crate's mock
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-pub struct UploadedFile {
-    pub filename: String,
-    pub content_type: Option<String>,
-    pub bytes: Bytes,
-}
+pub use docsgpt::mock::{Call, Recorder, UploadedFile, loose_json, parse_body, read_multipart};
 
-/// One request seen by a mock.
-#[derive(Clone, Debug)]
-pub struct Call {
-    /// Telegram method name (`sendMessage`) or DocsGPT path (`/stream`).
-    pub method: String,
-    /// JSON body, or the text fields of a multipart form (JSON-ish values parsed).
-    pub body: Value,
-    pub query: HashMap<String, String>,
-    /// Multipart file parts by field name.
-    pub files: HashMap<String, UploadedFile>,
-    pub at: Instant,
-}
-
-impl Call {
-    pub fn new(method: &str, body: Value) -> Self {
-        Self {
-            method: method.to_string(),
-            body,
-            query: HashMap::new(),
-            files: HashMap::new(),
-            at: Instant::now(),
-        }
-    }
+/// Telegram-flavoured accessors for recorded calls.
+pub trait CallExt {
     /// `text` field (sendMessage, drafts, callbacks).
-    pub fn text(&self) -> String {
+    fn text(&self) -> String;
+    /// `rich_message.markdown` field (sendRichMessage, sendRichMessageDraft).
+    fn markdown(&self) -> String;
+}
+
+impl CallExt for Call {
+    fn text(&self) -> String {
         self.body["text"].as_str().unwrap_or("").to_string()
     }
-    /// `rich_message.markdown` field (sendRichMessage, sendRichMessageDraft).
-    pub fn markdown(&self) -> String {
-        self.body["rich_message"]["markdown"]
-            .as_str()
-            .unwrap_or("")
-            .to_string()
-    }
-    pub fn file(&self, name: &str) -> &UploadedFile {
-        self.files.get(name).unwrap_or_else(|| {
-            panic!(
-                "no multipart file {name:?} in {} call; file fields: {:?}",
-                self.method,
-                self.files.keys().collect::<Vec<_>>()
-            )
-        })
+    fn markdown(&self) -> String {
+        self.body["rich_message"]["markdown"].as_str().unwrap_or("").to_string()
     }
 }
 
-#[derive(Default)]
-pub struct Recorder {
-    calls: Mutex<Vec<Call>>,
-}
 
-impl Recorder {
-    pub fn record(&self, call: Call) {
-        self.calls.lock().unwrap().push(call);
-    }
-    pub fn all(&self) -> Vec<Call> {
-        self.calls.lock().unwrap().clone()
-    }
-    pub fn calls(&self, method: &str) -> Vec<Call> {
-        self.all()
-            .into_iter()
-            .filter(|c| c.method == method)
-            .collect()
-    }
-    pub fn count(&self, method: &str) -> usize {
-        self.calls(method).len()
-    }
-    pub fn last(&self, method: &str) -> Option<Call> {
-        self.calls(method).pop()
-    }
-    pub fn summary(&self) -> String {
-        self.all()
-            .iter()
-            .map(|c| format!("  {} {}", c.method, truncate(&c.body.to_string(), 200)))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    /// Wait until a call to `method` satisfying `pred` has been recorded; returns the first such call.
-    pub async fn wait_for(
-        &self,
-        method: &str,
-        pred: impl Fn(&Call) -> bool,
-        timeout: Duration,
-    ) -> Call {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(c) = self.calls(method).into_iter().find(|c| pred(c)) {
-                return c;
-            }
-            if Instant::now() >= deadline {
-                panic!(
-                    "timed out after {timeout:?} waiting for {method}; recorded calls:\n{}",
-                    self.summary()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-    pub async fn wait_any(&self, method: &str) -> Call {
-        self.wait_for(method, |_| true, WAIT).await
-    }
-    /// Wait until at least `n` calls to `method` exist; returns all of them.
-    pub async fn wait_count(&self, method: &str, n: usize, timeout: Duration) -> Vec<Call> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let calls = self.calls(method);
-            if calls.len() >= n {
-                return calls;
-            }
-            if Instant::now() >= deadline {
-                panic!(
-                    "timed out after {timeout:?} waiting for {n} {method} calls (have {}); recorded calls:\n{}",
-                    calls.len(),
-                    self.summary()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-    /// Sleep for `within`, then assert `method` was never called.
-    pub async fn assert_none(&self, method: &str, within: Duration) {
-        tokio::time::sleep(within).await;
-        let n = self.count(method);
-        assert!(
-            n == 0,
-            "expected no {method} calls, got {n}; recorded calls:\n{}",
-            self.summary()
-        );
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max).collect::<String>())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Body parsing shared by both mocks
-// ---------------------------------------------------------------------------
-
-/// Multipart text fields arrive as strings; frankenstein serialises non-string
-/// params as JSON text, so parse the ones that look like JSON.
-fn loose_json(s: &str) -> Value {
-    let t = s.trim();
-    let looks_json = t.starts_with('{')
-        || t.starts_with('[')
-        || t == "true"
-        || t == "false"
-        || t == "null"
-        || t.parse::<i64>().is_ok();
-    if looks_json {
-        serde_json::from_str(t).unwrap_or_else(|_| Value::String(s.to_string()))
-    } else {
-        Value::String(s.to_string())
-    }
-}
-
-async fn read_multipart(mut mp: Multipart) -> (Value, HashMap<String, UploadedFile>) {
-    let mut body = serde_json::Map::new();
-    let mut files = HashMap::new();
-    while let Some(field) = mp.next_field().await.expect("multipart field") {
-        let name = field.name().unwrap_or("").to_string();
-        let filename = field.file_name().map(str::to_string);
-        let content_type = field.content_type().map(str::to_string);
-        let bytes = field.bytes().await.expect("multipart field bytes");
-        match filename {
-            Some(filename) => {
-                files.insert(
-                    name,
-                    UploadedFile {
-                        filename,
-                        content_type,
-                        bytes,
-                    },
-                );
-            }
-            None => {
-                body.insert(name, loose_json(&String::from_utf8_lossy(&bytes)));
-            }
-        }
-    }
-    (Value::Object(body), files)
-}
-
-async fn parse_body(req: Request) -> (Value, HashMap<String, UploadedFile>) {
-    let ct = req
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ct.starts_with("multipart/form-data") {
-        let mp = Multipart::from_request(req, &())
-            .await
-            .expect("multipart request");
-        read_multipart(mp).await
-    } else {
-        let bytes = axum::body::to_bytes(req.into_body(), 64 << 20)
-            .await
-            .unwrap_or_default();
-        (
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-            HashMap::new(),
-        )
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Mock Telegram Bot API
@@ -564,334 +369,43 @@ async fn tg_handler(State(srv): State<Arc<TgServer>>, req: Request) -> Response 
 }
 
 // ---------------------------------------------------------------------------
-// Mock DocsGPT
+// Mock DocsGPT: the docsgpt crate's mock, under this harness's helper names
 // ---------------------------------------------------------------------------
 
-/// One piece of a scripted `/stream` response.
-pub enum Step {
-    /// `data: <json>\n\n`
-    Event(Value),
-    /// Raw bytes (e.g. `: keepalive\n\n`).
-    Raw(String),
-    /// Stall the stream (a keepalive comment is sent afterwards).
-    Sleep(Duration),
-}
+pub use docsgpt::mock::{Step, StreamReply, answer_steps, reply_text, sse};
+pub type DocsMock = docsgpt::mock::MockDocsGpt;
 
-pub enum StreamReply {
-    Sse(Vec<Step>),
-    /// Plain HTTP status + body instead of a stream.
-    Http(u16, String),
-}
-
-pub fn sse(steps: Vec<Step>) -> StreamReply {
-    StreamReply::Sse(steps)
+pub async fn start_docsgpt() -> Arc<DocsMock> {
+    docsgpt::mock::MockDocsGpt::start().await
 }
 pub fn ev(v: Value) -> Step {
     Step::Event(v)
 }
 pub fn ev_message_id(message_id: &str, conversation_id: &str) -> Value {
-    json!({"type": "message_id", "message_id": message_id, "conversation_id": conversation_id, "request_id": "req-1"})
+    docsgpt::mock::ev::message_id(message_id, conversation_id)
 }
 pub fn ev_answer(delta: &str) -> Value {
-    json!({"type": "answer", "answer": delta})
+    docsgpt::mock::ev::answer(delta)
 }
 pub fn ev_thought(t: &str) -> Value {
-    json!({"type": "thought", "thought": t})
+    docsgpt::mock::ev::thought(t)
 }
 pub fn ev_source(list: &[(&str, &str)]) -> Value {
-    json!({"type": "source", "source": list.iter().map(|(title, link)| json!({"title": title, "link": link})).collect::<Vec<_>>()})
+    docsgpt::mock::ev::source(list)
 }
 pub fn ev_tool_call(data: Value) -> Value {
-    json!({"type": "tool_call", "data": data})
+    docsgpt::mock::ev::tool_call(data)
 }
 pub fn ev_id(conversation_id: &str) -> Value {
-    json!({"type": "id", "id": conversation_id})
+    docsgpt::mock::ev::id(conversation_id)
 }
 pub fn ev_end() -> Value {
-    json!({"type": "end"})
+    docsgpt::mock::ev::end()
 }
 pub fn ev_error(message: &str) -> Value {
-    json!({"type": "error", "error": message})
+    docsgpt::mock::ev::error(message)
 }
 
-/// A realistic answer stream: message_id, word-sized deltas, optional sources,
-/// a keepalive comment, the conversation id, end.
-pub fn answer_steps(text: &str, conversation_id: &str, sources: &[(&str, &str)]) -> Vec<Step> {
-    let mut steps = vec![ev(ev_message_id("m1", conversation_id))];
-    let mut cur = String::new();
-    for ch in text.chars() {
-        cur.push(ch);
-        if ch == ' ' || ch == '\n' {
-            steps.push(ev(ev_answer(&cur)));
-            cur.clear();
-        }
-    }
-    if !cur.is_empty() {
-        steps.push(ev(ev_answer(&cur)));
-    }
-    if !sources.is_empty() {
-        steps.push(ev(ev_source(sources)));
-    }
-    steps.push(Step::Raw(": keepalive\n\n".into()));
-    steps.push(ev(ev_id(conversation_id)));
-    steps.push(ev(ev_end()));
-    steps
-}
-
-pub fn reply_text(text: &str, conversation_id: &str) -> StreamReply {
-    sse(answer_steps(text, conversation_id, &[]))
-}
-
-type StreamFn = Box<dyn FnMut(&Value) -> StreamReply + Send + 'static>;
-type AnswerFn = Box<dyn FnMut(&Value) -> (u16, Value) + Send + 'static>;
-
-pub struct Artifact {
-    pub filename: String,
-    pub mime: String,
-    pub bytes: Bytes,
-}
-
-pub struct DocsMock {
-    pub url: String,
-    /// Methods: `/stream`, `/api/answer`, `/api/store_attachment`, `/api/task_status`,
-    /// `/api/stt`, `/api/artifacts/download`, `/images`.
-    pub rec: Recorder,
-    stream: Mutex<StreamFn>,
-    answer: Mutex<AnswerFn>,
-    store: Mutex<(u16, Value)>,
-    task_status: Mutex<VecDeque<String>>,
-    stt: Mutex<(u16, Value)>,
-    artifacts: Mutex<HashMap<String, Artifact>>,
-    images: Mutex<HashMap<String, Bytes>>,
-}
-
-impl DocsMock {
-    /// Script `/stream`: the closure sees the request body and returns the reply.
-    pub fn on_stream(&self, f: impl FnMut(&Value) -> StreamReply + Send + 'static) {
-        *self.stream.lock().unwrap() = Box::new(f);
-    }
-    /// Script `/api/answer`.
-    pub fn on_answer(&self, f: impl FnMut(&Value) -> (u16, Value) + Send + 'static) {
-        *self.answer.lock().unwrap() = Box::new(f);
-    }
-    pub fn set_store_attachment(&self, status: u16, body: Value) {
-        *self.store.lock().unwrap() = (status, body);
-    }
-    /// Statuses returned by successive `/api/task_status` calls; `SUCCESS` once exhausted.
-    pub fn queue_task_status(&self, statuses: &[&str]) {
-        self.task_status
-            .lock()
-            .unwrap()
-            .extend(statuses.iter().map(|s| s.to_string()));
-    }
-    pub fn set_stt(&self, text: &str) {
-        *self.stt.lock().unwrap() = (200, json!({"success": true, "text": text}));
-    }
-    pub fn add_artifact(&self, id: &str, filename: &str, mime: &str, bytes: Bytes) {
-        self.artifacts.lock().unwrap().insert(
-            id.to_string(),
-            Artifact {
-                filename: filename.to_string(),
-                mime: mime.to_string(),
-                bytes,
-            },
-        );
-    }
-    pub fn add_image(&self, name: &str, bytes: Bytes) {
-        self.images.lock().unwrap().insert(name.to_string(), bytes);
-    }
-    pub fn image_url(&self, name: &str) -> String {
-        format!("{}/images/{name}", self.url)
-    }
-}
-
-fn sse_response(steps: Vec<Step>) -> Response {
-    let stream = futures_util::stream::unfold(steps.into_iter(), |mut it| async move {
-        let step = it.next()?;
-        let chunk = match step {
-            Step::Event(v) => format!("data: {v}\n\n"),
-            Step::Raw(s) => s,
-            Step::Sleep(d) => {
-                tokio::time::sleep(d).await;
-                ": keepalive\n\n".to_string()
-            }
-        };
-        Some((
-            Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)),
-            it,
-        ))
-    });
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from_stream(stream))
-        .unwrap()
-}
-
-async fn docs_stream(
-    State(m): State<Arc<DocsMock>>,
-    axum::Json(body): axum::Json<Value>,
-) -> Response {
-    m.rec.record(Call::new("/stream", body.clone()));
-    let reply = {
-        let mut f = m.stream.lock().unwrap();
-        (*f)(&body)
-    };
-    match reply {
-        StreamReply::Http(code, text) => (
-            StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            text,
-        )
-            .into_response(),
-        StreamReply::Sse(steps) => sse_response(steps),
-    }
-}
-
-async fn docs_answer(
-    State(m): State<Arc<DocsMock>>,
-    axum::Json(body): axum::Json<Value>,
-) -> Response {
-    m.rec.record(Call::new("/api/answer", body.clone()));
-    let (code, v) = {
-        let mut f = m.answer.lock().unwrap();
-        (*f)(&body)
-    };
-    (
-        StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        axum::Json(v),
-    )
-        .into_response()
-}
-
-async fn docs_store(State(m): State<Arc<DocsMock>>, mp: Multipart) -> Response {
-    let (body, files) = read_multipart(mp).await;
-    let mut call = Call::new("/api/store_attachment", body);
-    call.files = files;
-    m.rec.record(call);
-    let (code, v) = m.store.lock().unwrap().clone();
-    (
-        StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        axum::Json(v),
-    )
-        .into_response()
-}
-
-async fn docs_task(
-    State(m): State<Arc<DocsMock>>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Response {
-    let mut call = Call::new("/api/task_status", Value::Null);
-    call.query = q;
-    m.rec.record(call);
-    let status = m
-        .task_status
-        .lock()
-        .unwrap()
-        .pop_front()
-        .unwrap_or_else(|| "SUCCESS".to_string());
-    axum::Json(json!({"status": status})).into_response()
-}
-
-async fn docs_stt(
-    State(m): State<Arc<DocsMock>>,
-    Query(q): Query<HashMap<String, String>>,
-    mp: Multipart,
-) -> Response {
-    let (body, files) = read_multipart(mp).await;
-    let mut call = Call::new("/api/stt", body);
-    call.query = q;
-    call.files = files;
-    m.rec.record(call);
-    let (code, v) = m.stt.lock().unwrap().clone();
-    (
-        StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        axum::Json(v),
-    )
-        .into_response()
-}
-
-async fn docs_artifact(
-    State(m): State<Arc<DocsMock>>,
-    Path(id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Response {
-    let mut call = Call::new("/api/artifacts/download", json!({"id": id}));
-    call.query = q;
-    m.rec.record(call);
-    let found = m
-        .artifacts
-        .lock()
-        .unwrap()
-        .get(&id)
-        .map(|a| (a.filename.clone(), a.mime.clone(), a.bytes.clone()));
-    match found {
-        Some((filename, mime, bytes)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, mime)
-            .header(
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{filename}\""),
-            )
-            .body(Body::from(bytes))
-            .unwrap(),
-        None => (StatusCode::NOT_FOUND, "no such artifact").into_response(),
-    }
-}
-
-async fn docs_image(State(m): State<Arc<DocsMock>>, Path(name): Path<String>) -> Response {
-    m.rec.record(Call::new("/images", json!({"name": name})));
-    let found = m.images.lock().unwrap().get(&name).cloned();
-    match found {
-        Some(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/png")
-            .body(Body::from(bytes))
-            .unwrap(),
-        None => (StatusCode::NOT_FOUND, "no such image").into_response(),
-    }
-}
-
-/// Start a mock DocsGPT on a random port, on the current runtime.
-pub async fn start_docsgpt() -> Arc<DocsMock> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind mock docsgpt");
-    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-    let m = Arc::new(DocsMock {
-        url,
-        rec: Recorder::default(),
-        stream: Mutex::new(Box::new(|_: &Value| {
-            reply_text("Hello from the mock assistant.", "conv-1")
-        })),
-        answer: Mutex::new(Box::new(|_: &Value| {
-            (200, json!({"answer": "X is y", "conversation_id": "c"}))
-        })),
-        store: Mutex::new((
-            200,
-            json!({"success": true, "attachment_id": "att-1", "task_id": "task-1"}),
-        )),
-        task_status: Mutex::new(VecDeque::new()),
-        stt: Mutex::new((200, json!({"success": true, "text": "transcribed speech"}))),
-        artifacts: Mutex::new(HashMap::new()),
-        images: Mutex::new(HashMap::new()),
-    });
-    let app = Router::new()
-        .route("/stream", post(docs_stream))
-        .route("/api/answer", post(docs_answer))
-        .route("/api/store_attachment", post(docs_store))
-        .route("/api/task_status", get(docs_task))
-        .route("/api/stt", post(docs_stt))
-        .route("/api/artifacts/{id}/download", get(docs_artifact))
-        .route("/images/{name}", get(docs_image))
-        .with_state(m.clone());
-    tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("mock docsgpt server");
-    });
-    m
-}
 
 // ---------------------------------------------------------------------------
 // Running the real bot

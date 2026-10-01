@@ -41,5 +41,6 @@ codegen-units = 1
 strip = true
 
 [dev-dependencies]
+docsgpt = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown", features = ["mock"] }
 # The e2e mocks parse multipart uploads (sendDocument, store_attachment) with axum's extractor.
 axum = { version = "0.8.9", features = ["multipart"] }

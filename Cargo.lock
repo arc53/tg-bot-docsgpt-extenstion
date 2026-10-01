@@ -671,6 +671,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "docsgpt"
+version = "0.2.0"
+source = "git+https://github.com/arc53-machine/docsgpt-rs?branch=turns-unknown#8a44e07bdef241951a281f020161ec998849344c"
+dependencies = [
+ "axum",
+ "base64",
+ "bytes",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "docsgpt-telegram"
 version = "2.0.0"
 dependencies = [
@@ -681,6 +698,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "docsgpt",
  "dotenvy",
  "frankenstein",
  "futures-util",
