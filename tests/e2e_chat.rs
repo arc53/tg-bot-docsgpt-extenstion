@@ -535,7 +535,8 @@ async fn stop_button_cancels_generation_promptly() {
     let pressed = Instant::now();
     tg.push(
         "stopped_message_generation",
-        json!({"chat": chat(CHAT, "private"), "draft_id": draft_id}),
+        // Telegram sends draft_id as a string (although documented as Integer).
+        json!({"chat": chat(CHAT, "private"), "draft_id": draft_id.to_string()}),
     );
 
     let final_msg = tg

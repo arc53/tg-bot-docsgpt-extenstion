@@ -105,7 +105,22 @@ pub struct MessageGenerationStopped {
     pub chat: Chat,
     #[serde(default)]
     pub message_thread_id: Option<i32>,
+    /// Documented as Integer, but Telegram sends it as a string.
+    #[serde(deserialize_with = "int_or_string")]
     pub draft_id: i64,
+}
+
+fn int_or_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrString {
+        Int(i64),
+        Str(String),
+    }
+    match IntOrString::deserialize(d)? {
+        IntOrString::Int(n) => Ok(n),
+        IntOrString::Str(s) => s.trim().parse().map_err(serde::de::Error::custom),
+    }
 }
 
 /// Every update type we ask Telegram for, including ones the pinned crate
@@ -133,10 +148,13 @@ pub enum Incoming {
 /// Parse one raw update object, tolerating kinds the crate doesn't model.
 pub fn parse_update(v: Value) -> (i64, Incoming) {
     let update_id = v.get("update_id").and_then(Value::as_i64).unwrap_or(0);
-    if let Some(s) = v.get("stopped_message_generation")
-        && let Ok(parsed) = serde_json::from_value::<MessageGenerationStopped>(s.clone())
-    {
-        return (update_id, Incoming::StoppedGeneration(parsed));
+    if let Some(s) = v.get("stopped_message_generation") {
+        match serde_json::from_value::<MessageGenerationStopped>(s.clone()) {
+            Ok(parsed) => return (update_id, Incoming::StoppedGeneration(parsed)),
+            Err(e) => {
+                tracing::warn!(update_id, error = %e, payload = %s, "could not parse stopped_message_generation")
+            }
+        }
     }
     match serde_json::from_value::<frankenstein::updates::Update>(v.clone()) {
         Ok(u) => (update_id, Incoming::Update(Box::new(u), v)),
@@ -161,6 +179,20 @@ pub fn parse_update(v: Value) -> (i64, Incoming) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_stop_update_as_telegram_sends_it() {
+        // Real payload: draft_id arrives as a string, although the docs say Integer.
+        let v = json!({"update_id": 8, "stopped_message_generation": {
+            "chat": {"first_name": "Alice", "id": 1001, "type": "private", "username": "alice"},
+            "draft_id": "408190861"}});
+        match parse_update(v).1 {
+            Incoming::StoppedGeneration(s) => {
+                assert_eq!((s.chat.id, s.draft_id), (1001, 408190861))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn parses_stop_update() {
