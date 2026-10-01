@@ -192,6 +192,15 @@ pub fn load(explicit: Option<&Path>) -> Result<Config> {
 
 /// Expand `${VAR}` references and parse a TOML config.
 pub fn parse(raw: &str) -> Result<Config> {
+    // Before expanding ${VAR}: a leftover `${MONGODB_URI}` whose variable is
+    // already unset would otherwise fail with "missing environment variables".
+    static MONGO: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?m)^\s*backend\s*=\s*["']mongo(db)?["']|\$\{MONGODB_"#)
+            .expect("valid regex")
+    });
+    if MONGO.is_match(raw) {
+        bail!(MONGODB_REMOVED);
+    }
     let expanded = expand_env(raw)?;
     toml::from_str(&expanded).map_err(|e| {
         let msg = e.to_string();
@@ -327,6 +336,13 @@ mod tests {
         let err = parse("[storage]\nbackend = \"mongodb\"\nuri = \"mongodb://x\"\n")
             .unwrap_err()
             .to_string();
+        assert!(err.contains("MongoDB storage was removed"), "{err}");
+        // Even when the Mongo variables are already gone from the environment.
+        let err = parse(
+            "[storage]\nbackend = \"mongodb\"\nuri = \"${DOCSGPT_TG_TEST_UNSET_MONGO_URI}\"\n",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("MongoDB storage was removed"), "{err}");
         let ok = parse("[storage]\nbackend = \"memory\"\n").unwrap();
         assert_eq!(ok.storage.backend, Backend::Memory);

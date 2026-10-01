@@ -421,68 +421,98 @@ pub fn markdown_to_plain(md: &str) -> String {
     unescape_v2(&joined)
 }
 
-static LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").expect("valid regex")
-});
-
 /// Undo MarkdownV2: drop formatting marks and escapes in running text and turn
 /// `[text](url)` into `text (url)`. Inline code and fenced blocks are copied
-/// literally (their `*`, `_`, `~` and brackets are content, not markup).
+/// literally (their `*`, `_`, `~` and brackets are content, not markup); link
+/// text may itself contain code.
 fn unescape_v2(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
-    let mut text = String::new();
-    let flush = |text: &mut String, out: &mut String| {
-        out.push_str(&LINK.replace_all(text, "$1 ($2)"));
-        text.clear();
-    };
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         if c == '\\' && i + 1 < chars.len() {
-            text.push(chars[i + 1]);
+            out.push(chars[i + 1]);
             i += 2;
             continue;
         }
         if c == '`' {
-            flush(&mut text, &mut out);
-            let fence = chars[i..].starts_with(&['`', '`', '`']);
-            let (mut j, close) = if fence {
-                // Skip the opening fence and its language tag.
-                let mut j = i + 3;
-                while j < chars.len() && chars[j] != '\n' {
-                    j += 1;
-                }
-                (j + 1, "```")
-            } else {
-                (i + 1, "`")
-            };
-            let close: Vec<char> = close.chars().collect();
-            let mut code = String::new();
-            while j < chars.len() && !chars[j..].starts_with(&close) {
-                if chars[j] == '\\' && j + 1 < chars.len() {
-                    code.push(chars[j + 1]);
-                    j += 2;
-                } else {
-                    code.push(chars[j]);
-                    j += 1;
-                }
-            }
-            out.push_str(if fence {
-                code.strip_suffix('\n').unwrap_or(&code)
-            } else {
-                &code
-            });
-            i = (j + close.len()).min(chars.len());
+            let (code, next) = code_span(&chars, i);
+            out.push_str(&code);
+            i = next;
+            continue;
+        }
+        if c == '['
+            && let Some((label, url, next)) = link_at(&chars, i)
+        {
+            out.push_str(&format!("{} ({url})", unescape_v2(&label)));
+            i = next;
             continue;
         }
         if !matches!(c, '*' | '_' | '~') {
-            text.push(c);
+            out.push(c);
         }
         i += 1;
     }
-    flush(&mut text, &mut out);
     out
+}
+
+/// The code starting at the backtick at `i` (inline or fenced), unescaped,
+/// and the index after its closing backticks.
+fn code_span(chars: &[char], i: usize) -> (String, usize) {
+    let fence = chars[i..].starts_with(&['`', '`', '`']);
+    let (mut j, close) = if fence {
+        // Skip the opening fence and its language tag.
+        let mut j = i + 3;
+        while j < chars.len() && chars[j] != '\n' {
+            j += 1;
+        }
+        (j + 1, 3)
+    } else {
+        (i + 1, 1)
+    };
+    let mut code = String::new();
+    while j < chars.len() && !chars[j..].starts_with(&['`', '`', '`'][..close]) {
+        if chars[j] == '\\' && j + 1 < chars.len() {
+            code.push(chars[j + 1]);
+            j += 2;
+        } else {
+            code.push(chars[j]);
+            j += 1;
+        }
+    }
+    if fence && code.ends_with('\n') {
+        code.pop();
+    }
+    (code, (j + close).min(chars.len()))
+}
+
+/// A MarkdownV2 link `[label](url)` at `i`: the raw label, the unescaped URL
+/// and the index after `)`. Escaped brackets (`\[`) never start or end a link.
+fn link_at(chars: &[char], i: usize) -> Option<(String, String, usize)> {
+    let mut j = i + 1;
+    while j < chars.len() && chars[j] != ']' {
+        match chars[j] {
+            '\\' => j += 2,
+            '`' => j = code_span(chars, j).1,
+            '\n' => return None,
+            _ => j += 1,
+        }
+    }
+    if chars.get(j + 1) != Some(&'(') {
+        return None;
+    }
+    let label: String = chars[i + 1..j].iter().collect();
+    let mut url = String::new();
+    let mut k = j + 2;
+    while k < chars.len() && chars[k] != ')' {
+        if chars[k] == '\\' && k + 1 < chars.len() {
+            k += 1;
+        }
+        url.push(chars[k]);
+        k += 1;
+    }
+    (k < chars.len()).then_some((label, url, k + 1))
 }
 
 /// Rich Markdown cannot exceed the limit; cut at a block boundary without
@@ -601,6 +631,13 @@ mod tests {
             plain.contains("key_name") && plain.contains("a_b"),
             "{plain}"
         );
+        // Link text that is code.
+        assert_eq!(
+            markdown_to_plain("Use [`snake_case`](https://d.e) here."),
+            "Use snake_case (https://d.e) here."
+        );
+        // Escaped brackets are literal text, not a link.
+        assert_eq!(markdown_to_plain("a \\[b\\](c)"), "a [b](c)");
     }
 
     #[test]

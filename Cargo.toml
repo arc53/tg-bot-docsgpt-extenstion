@@ -7,7 +7,6 @@ license = "MIT"
 repository = "https://github.com/arc53/tg-bot-docsgpt-extenstion"
 
 [dependencies]
-docsgpt = "0.2"
 docsgpt-bot = "0.2"
 base64 = "0.22"
 anyhow = "1.0.104"
