@@ -442,7 +442,8 @@ dependencies = [
 [[package]]
 name = "docsgpt"
 version = "0.2.0"
-source = "git+https://github.com/arc53-machine/docsgpt-rs?branch=turns-unknown#8a44e07bdef241951a281f020161ec998849344c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5483197fbf2f831ad28a3715965fdd1ac74eb6b718fa6202bfc011fa2793984"
 dependencies = [
  "axum",
  "base64",
@@ -459,7 +460,8 @@ dependencies = [
 [[package]]
 name = "docsgpt-bot"
 version = "0.2.0"
-source = "git+https://github.com/arc53-machine/docsgpt-rs?branch=turns-unknown#8a44e07bdef241951a281f020161ec998849344c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0ee4ecbecdc0edd12473d84acec5685b8d1b9d661ffcbb9ab60b0222040c060"
 dependencies = [
  "async-trait",
  "docsgpt",

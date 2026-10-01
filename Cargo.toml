@@ -7,8 +7,8 @@ license = "MIT"
 repository = "https://github.com/arc53/tg-bot-docsgpt-extenstion"
 
 [dependencies]
-docsgpt = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown" }
-docsgpt-bot = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown" }
+docsgpt = "0.2"
+docsgpt-bot = "0.2"
 base64 = "0.22"
 anyhow = "1.0.104"
 async-trait = "0.1.92"
@@ -42,7 +42,7 @@ strip = true
 
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-docsgpt-bot = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown", features = ["testing"] }
-docsgpt = { git = "https://github.com/arc53-machine/docsgpt-rs", branch = "turns-unknown", features = ["mock"] }
+docsgpt-bot = { version = "0.2", features = ["testing"] }
+docsgpt = { version = "0.2", features = ["mock"] }
 # The e2e mocks parse multipart uploads (sendDocument, store_attachment) with axum's extractor.
 axum = { version = "0.8.9", features = ["multipart"] }
